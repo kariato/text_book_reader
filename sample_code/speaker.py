@@ -3,169 +3,173 @@ speaker.py — Streaming TTS engine using MLX chatterbox.
 
 Public API:
     load_tts_model(model_id)  -> model
-    speak_text(model, text, voice, sr, stop_event) -> None
-        Streams TTS audio to the speaker in real-time using a
-        producer/consumer thread pair. Blocks until playback completes
-        or stop_event is set.
+    BufferedSpeaker(model, voice, sr, max_buffers) -> speaker
+        Persistent engine for background synthesis and playback.
 """
 
 import threading
 import queue
 import time
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 from mlx_audio.tts.utils import load_model
 
 
-# ---------------------------------------------------------------------------
-# Public helpers
-# ---------------------------------------------------------------------------
-
 def load_tts_model(model_id: str = "mlx-community/chatterbox-turbo-fp16"):
     """Load and return a chatterbox TTS model."""
     return load_model(model_id)
 
 
-def speak_text(
-    model,
-    text: str,
-    voice: str = "af_heart",
-    sr: int = 24000,
-    stop_event: threading.Event | None = None,
-    blocksize: int = 2048,
-) -> None:
+class BufferedSpeaker:
     """
-    Speak *text* aloud using streaming TTS. Blocks until playback finishes
-    or stop_event is set.
-
-    Args:
-        model:       Loaded chatterbox TTS model.
-        text:        Plain text to synthesise.
-        voice:       Voice ID string (default: "af_heart").
-        sr:          Sample rate in Hz (default: 24000).
-        stop_event:  Optional threading.Event — set it to abort playback.
-        blocksize:   sounddevice callback blocksize in frames.
+    Manages background TTS synthesis and audio playback with buffering.
+    Uses a text_queue to feed the engine and an audio_queue (max 4) for playback.
     """
-    if stop_event is None:
-        stop_event = threading.Event()
+    def __init__(self, model, voice: str = "af_heart", sr: int = 24000, max_buffers: int = 4):
+        self.model = model
+        self.voice = voice
+        self.sr = sr
+        self.max_buffers = max_buffers
+        
+        self.text_queue = queue.Queue()
+        self.audio_queue = queue.Queue(maxsize=max_buffers)
+        self.stop_event = threading.Event()
+        
+        self._state = self._State()
+        
+        # Start persistent worker threads
+        self._synth_thread = threading.Thread(target=self._synthesis_loop, daemon=True)
+        self._play_thread = threading.Thread(target=self._playback_loop, daemon=True)
+        
+        self._synth_thread.start()
+        self._play_thread.start()
 
-    q: queue.Queue = queue.Queue(maxsize=8)  # backpressure keeps memory bounded
+    class _State:
+        def __init__(self):
+            self.buf = np.zeros((0,), dtype=np.float32)
+            self.fully_drained = False
 
-    producer = threading.Thread(
-        target=_tts_producer,
-        args=(model, text, voice, sr, q, stop_event),
-        daemon=True,
-    )
-    consumer = threading.Thread(
-        target=_audio_consumer,
-        args=(sr, q, stop_event, blocksize),
-        daemon=True,
-    )
+    def feed(self, text: str, callback=None):
+        """Add text to the synthesis queue with an optional callback when playback starts."""
+        self.text_queue.put((text, callback))
 
-    consumer.start()
-    producer.start()
+    def stop(self):
+        """Abort all current work and clear queues."""
+        self.stop_event.set()
+        # Clear queues
+        while not self.text_queue.empty():
+            try: self.text_queue.get_nowait()
+            except queue.Empty: break
+        while not self.audio_queue.empty():
+            try: self.audio_queue.get_nowait()
+            except queue.Empty: break
+        
+        # Give threads a moment to catch the stop signal
+        time.sleep(0.1)
+        self.stop_event.clear()
+        self._state.buf = np.zeros((0,), dtype=np.float32)
 
-    producer.join()
-    consumer.join()
-
-
-# ---------------------------------------------------------------------------
-# Internal threads
-# ---------------------------------------------------------------------------
-
-def _tts_producer(
-    model,
-    text: str,
-    voice: str,
-    sr: int,
-    q: queue.Queue,
-    stop_event: threading.Event,
-) -> None:
-    """
-    Generate TTS audio chunks and place them on the queue.
-    Always puts None at the end to signal completion to the consumer.
-    """
-    try:
-        for result in model.generate(text, voice=voice):
-            if stop_event.is_set():
-                break
-
-            chunk = np.array(result.audio).squeeze().astype(np.float32)
-
-            # Prevent clipping without full normalisation (avoids pumping artefact)
-            peak = np.max(np.abs(chunk)) + 1e-9
-            if peak > 1.0:
-                chunk = chunk / peak
-
-            # Block-with-timeout so we respect stop_event under backpressure
-            while not stop_event.is_set():
-                try:
-                    q.put(chunk, timeout=0.1)
-                    break
-                except queue.Full:
-                    continue
-    finally:
-        q.put(None)  # always signal end-of-stream
-
-
-def _audio_consumer(
-    sr: int,
-    q: queue.Queue,
-    stop_event: threading.Event,
-    blocksize: int,
-) -> None:
-    """
-    Pull audio chunks from the queue and play them via a sounddevice callback stream.
-    """
-    buf = np.zeros((0,), dtype=np.float32)
-
-    def callback(outdata, frames, time_info, status):
-        nonlocal buf
-
-        out = np.zeros((frames,), dtype=np.float32)
-
-        # Drain queue into internal buffer until we have enough frames
-        while buf.size < frames and not stop_event.is_set():
+    def _synthesis_loop(self):
+        while True:
+            item = self.text_queue.get()
+            if item is None: break
+            text, callback = item
+            
             try:
-                item = q.get_nowait()
-            except queue.Empty:
-                break
-            if item is None:
-                stop_event.set()
-                break
-            buf = np.concatenate([buf, np.asarray(item, dtype=np.float32).reshape(-1)])
+                first_chunk = True
+                for result in self.model.generate(text, voice=self.voice):
+                    if self.stop_event.is_set():
+                        break
 
-        n = min(frames, buf.size)
-        if n > 0:
-            out[:n] = buf[:n]
-            buf = buf[n:]
+                    chunk = np.array(result.audio).squeeze().astype(np.float32)
+                    peak = np.max(np.abs(chunk)) + 1e-9
+                    if peak > 1.0: chunk = chunk / peak
 
-        outdata[:, 0] = out  # mono → channel 0
+                    # Backpressure
+                    while not self.stop_event.is_set():
+                        try:
+                            # Attach callback only to the first buffer of this text chunk
+                            cb = callback if first_chunk else None
+                            self.audio_queue.put((chunk, cb), timeout=0.1)
+                            first_chunk = False
+                            break
+                        except queue.Full:
+                            continue
+            except Exception as e:
+                print(f"Synthesis Error: {e}")
 
-    with sd.OutputStream(
-        samplerate=sr,
-        channels=1,
-        dtype="float32",
-        blocksize=blocksize,
-        callback=callback,
-    ):
-        while not stop_event.is_set():
-            time.sleep(0.05)
+    def _playback_loop(self):
+        finished_event = threading.Event()
+        
+        def callback(outdata, frames, time_info, status):
+            out = np.zeros((frames,), dtype=np.float32)
+
+            while self._state.buf.size < frames and not self.stop_event.is_set():
+                try:
+                    # Audio queue now yields (data, callback)
+                    data, cb = self.audio_queue.get_nowait()
+                    if cb:
+                        # Non-blocking callback
+                        threading.Thread(target=cb, daemon=True).start()
+                    
+                    self._state.buf = np.concatenate([self._state.buf, np.asarray(data, dtype=np.float32).reshape(-1)])
+                except queue.Empty:
+                    break
+
+            n = min(frames, self._state.buf.size)
+            if n > 0:
+                out[:n] = self._state.buf[:n]
+                self._state.buf = self._state.buf[n:]
+            
+            outdata[:, 0] = out
+
+            if self.stop_event.is_set():
+                raise sd.CallbackStop()
+
+        while True:
+            try:
+                with sd.OutputStream(
+                    samplerate=self.sr,
+                    channels=1,
+                    dtype="float32",
+                    blocksize=2048,
+                    callback=callback,
+                    finished_callback=finished_event.set
+                ):
+                    while not self.stop_event.is_set():
+                        finished_event.wait(0.1)
+            except Exception:
+                pass
+            
+            if self.stop_event.is_set():
+                time.sleep(0.1)
 
 
-# ---------------------------------------------------------------------------
-# Standalone test
-# ---------------------------------------------------------------------------
-
-def main():
-    print("Loading model…")
-    model = load_tts_model()
-    stop = threading.Event()
-    print("Speaking…")
-    speak_text(model, "Hello! This is a test of the streaming TTS system.", stop_event=stop)
-    print("Done.")
+def speak_text(model, text, voice="af_heart", sr=24000, stop_event=None):
+    """Legacy one-shot wrapper. Blocks until done."""
+    speaker = BufferedSpeaker(model, voice, sr)
+    speaker.feed(text)
+    
+    # Poison pill to signal end
+    speaker.text_queue.put(None)
+    
+    # Wait for synthesis and playback to drain (simple approach for legacy)
+    while not speaker.text_queue.empty() or not speaker.audio_queue.empty():
+        if stop_event and stop_event.is_set():
+            speaker.stop()
+            break
+        time.sleep(0.1)
+    
+    # Wait a bit more for final buffer to clear
+    time.sleep(0.5)
+    speaker.stop()
 
 
 if __name__ == "__main__":
-    main()
+    print("Loading model…")
+    m = load_tts_model()
+    print("Speaking…")
+    speak_text(m, "This is a test of the buffered background speaker engine.")
+    print("Done.")
