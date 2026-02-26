@@ -14,11 +14,13 @@ from reader import BookReader
 from speaker import load_tts_model, BufferedSpeaker
 from splitter import BookSplitter
 
+LAST_READ_FILE = Path(__file__).parent / "last_read.json"
+
 class BookReaderGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Python Book Reader")
-        self.root.geometry("800x600")
+        self.root.geometry("800x800")
 
         self.reader = None
         self.model = None
@@ -30,6 +32,10 @@ class BookReaderGUI:
         self.splitter = BookSplitter(verbose=False)
 
         self._setup_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.exit_app)
+        
+        # Auto-load last session
+        self.root.after(100, self.load_session)
 
     def _setup_ui(self):
         # Top controls
@@ -53,6 +59,25 @@ class BookReaderGUI:
 
         self.btn_load_bkm = tk.Button(ctrl_frame, text="Load Bookmark", command=self.load_bookmark_dialog, state=tk.DISABLED)
         self.btn_load_bkm.pack(side=tk.LEFT, padx=5)
+
+        self.btn_exit = tk.Button(ctrl_frame, text="Exit", command=self.exit_app)
+        self.btn_exit.pack(side=tk.RIGHT, padx=5)
+
+        # Navigation Controls
+        nav_frame = tk.Frame(self.root)
+        nav_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+
+        self.btn_prev_ch = tk.Button(nav_frame, text="|<<", width=5, command=self.prev_chapter, state=tk.DISABLED)
+        self.btn_prev_ch.pack(side=tk.LEFT, padx=2)
+
+        self.btn_prev_sc = tk.Button(nav_frame, text="<<", width=5, command=self.prev_scene, state=tk.DISABLED)
+        self.btn_prev_sc.pack(side=tk.LEFT, padx=2)
+
+        self.btn_next_sc = tk.Button(nav_frame, text=">>", width=5, command=self.next_scene, state=tk.DISABLED)
+        self.btn_next_sc.pack(side=tk.LEFT, padx=2)
+
+        self.btn_next_ch = tk.Button(nav_frame, text=">>|", width=5, command=self.next_chapter, state=tk.DISABLED)
+        self.btn_next_ch.pack(side=tk.LEFT, padx=2)
 
         # Labels
         self.lbl_status = tk.Label(self.root, text="Please select a book folder...")
@@ -78,6 +103,14 @@ class BookReaderGUI:
 
         self.btn_save_note = tk.Button(notes_frame, text="Save Note", command=self.save_note, state=tk.DISABLED)
         self.btn_save_note.pack(side=tk.RIGHT, padx=5, pady=5)
+
+        # Recent Notes Pane
+        recent_frame = tk.LabelFrame(self.root, text="Recent Notes (last updates from notes.txt)")
+        recent_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        self.txt_recent_notes = scrolledtext.ScrolledText(recent_frame, height=8, font=("Helvetica", 10), wrap=tk.WORD)
+        self.txt_recent_notes.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.txt_recent_notes.config(state=tk.DISABLED)
 
     def log_status(self, msg, is_error=False):
         color = "red" if is_error else "black"
@@ -112,8 +145,33 @@ class BookReaderGUI:
             
             self.txt_notes.delete("1.0", tk.END)
             self.log_status(f"Note saved to {os.path.basename(notes_file)}")
+            self.update_notes_display()
         except Exception as e:
             self.handle_error("Save Note Error", e)
+
+    def update_notes_display(self):
+        """Reload the notes.txt file into the recent notes pane."""
+        if not self.reader: return
+        try:
+            notes_file = self.reader.scenes_dir / "notes.txt"
+            if not notes_file.exists():
+                content = "(No notes yet)"
+            else:
+                # Read last 10KB to keep it snappy
+                with open(notes_file, "r", encoding="utf-8") as f:
+                    if os.path.getsize(notes_file) > 10000:
+                        f.seek(os.path.getsize(notes_file) - 10000)
+                        content = "... [earlier notes truncated] ...\n" + f.read()
+                    else:
+                        content = f.read()
+
+            self.txt_recent_notes.config(state=tk.NORMAL)
+            self.txt_recent_notes.delete("1.0", tk.END)
+            self.txt_recent_notes.insert(tk.END, content.strip())
+            self.txt_recent_notes.see(tk.END)
+            self.txt_recent_notes.config(state=tk.DISABLED)
+        except Exception as e:
+            print(f"Error updating notes display: {e}")
 
     def import_book(self):
         file_path = filedialog.askopenfilename(
@@ -153,6 +211,14 @@ class BookReaderGUI:
             self.btn_save_bkm.config(state=tk.NORMAL)
             self.btn_load_bkm.config(state=tk.NORMAL)
             self.btn_save_note.config(state=tk.NORMAL)
+            
+            self.btn_prev_ch.config(state=tk.NORMAL)
+            self.btn_prev_sc.config(state=tk.NORMAL)
+            self.btn_next_sc.config(state=tk.NORMAL)
+            self.btn_next_ch.config(state=tk.NORMAL)
+            
+            self.update_notes_display()
+            
             if not self.model and not self.model_loading:
                 self.load_model_async()
         except Exception as e:
@@ -241,13 +307,82 @@ class BookReaderGUI:
         if not self.stop_event.is_set():
             self.log_status("Stopped.")
 
-    def stop_playback(self):
+    def stop_playback(self, silent=False):
         self.stop_event.set()
         if self.speaker:
             self.speaker.stop()
         self.playing = False
-        self.log_status("Stopping...")
+        if not silent:
+            self.log_status("Stopping...")
+        self.save_session()
         self._on_stop()
+
+    def save_session(self):
+        """Save current reading position to last_read.json."""
+        if not self.reader: return
+        try:
+            import json
+            data = {
+                "scenes_dir": str(self.reader.scenes_dir.resolve()),
+                "index": self.reader._index,
+                "sentence_index": self.reader._sentence_index
+            }
+            LAST_READ_FILE.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"Error saving session: {e}")
+
+    def load_session(self):
+        """Load the last read session if it exists."""
+        if not LAST_READ_FILE.exists(): return
+        try:
+            import json
+            data = json.loads(LAST_READ_FILE.read_text())
+            folder = data.get("scenes_dir")
+            if folder and os.path.isdir(folder):
+                self._load_folder(folder)
+                # Position is restored by BookReader's default progress file if it matches,
+                # but we can force it here if they differ.
+                if self.reader:
+                    self.reader._index = data.get("index", 0)
+                    self.reader._sentence_index = data.get("sentence_index", 0)
+                    self.update_display()
+        except Exception as e:
+            print(f"Error loading session: {e}")
+
+    def exit_app(self):
+        """Save state and close the application."""
+        self.stop_playback(silent=True)
+        self.save_session()
+        self.root.destroy()
+        sys.exit(0)
+
+    def _navigate(self, func):
+        """Generic navigation wrapper to handle playback state."""
+        if not self.reader: return
+        
+        was_playing = self.playing
+        if was_playing:
+            self.stop_playback(silent=True)
+            
+        if func():
+            self.update_display()
+            if was_playing:
+                # Small delay to ensure speaker threads have cleared
+                self.root.after(200, self.start_playback)
+        else:
+            self.log_status("End of navigation range.")
+
+    def next_scene(self):
+        self._navigate(self.reader.next_scene)
+
+    def prev_scene(self):
+        self._navigate(self.reader.prev_scene)
+
+    def next_chapter(self):
+        self._navigate(self.reader.next_chapter)
+
+    def prev_chapter(self):
+        self._navigate(self.reader.prev_chapter)
 
     def save_bookmark_dialog(self):
         if not self.reader: return

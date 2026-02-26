@@ -308,6 +308,53 @@ class BookReader:
             return self.current
         return None
 
+    def next_chapter(self) -> Scene | None:
+        """Jump to the first scene of the next chapter."""
+        current_ch = self.current.chapter
+        for i, s in enumerate(self._scenes):
+            if s.chapter > current_ch:
+                self._index = i
+                self._sentence_index = 0
+                self.save_progress()
+                return self.current
+        return None
+
+    def prev_chapter(self) -> Scene | None:
+        """Jump to the first scene of the previous chapter (or the start of current if already at start)."""
+        current_ch = self.current.chapter
+        
+        # If we are not at the first scene of the current chapter, go to it first
+        first_scene_of_current = -1
+        for i, s in enumerate(self._scenes):
+            if s.chapter == current_ch:
+                first_scene_of_current = i
+                break
+        
+        if self._index > first_scene_of_current:
+            self._index = first_scene_of_current
+            self._sentence_index = 0
+            self.save_progress()
+            return self.current
+
+        # Otherwise go to the first scene of the previous chapter
+        target_ch = current_ch - 1
+        if target_ch < 1:
+            return None
+            
+        first_scene_of_prev = -1
+        for i, s in enumerate(self._scenes):
+            if s.chapter == target_ch:
+                first_scene_of_prev = i
+                break
+        
+        if first_scene_of_prev != -1:
+            self._index = first_scene_of_prev
+            self._sentence_index = 0
+            self.save_progress()
+            return self.current
+            
+        return None
+
     def go_to(self, chapter: int, scene: int, sentence: int = 0) -> Scene | None:
         """Jump to a specific chapter/scene/sentence. Returns the Scene or None if not found."""
         for i, s in enumerate(self._scenes):
