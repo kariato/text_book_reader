@@ -65,9 +65,19 @@ class BookReaderGUI:
         self.lbl_scene.pack(side=tk.TOP, fill=tk.X, padx=10)
 
         # Scene Text Display
-        self.txt_display = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, font=("Georgia", 12))
-        self.txt_display.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.txt_display = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, font=("Georgia", 12), height=15)
+        self.txt_display.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.txt_display.config(state=tk.DISABLED)
+
+        # Notes Section
+        notes_frame = tk.LabelFrame(self.root, text="Scene Notes (appended to notes.txt in book folder)")
+        notes_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+
+        self.txt_notes = tk.Text(notes_frame, height=4, font=("Helvetica", 11))
+        self.txt_notes.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+
+        self.btn_save_note = tk.Button(notes_frame, text="Save Note", command=self.save_note, state=tk.DISABLED)
+        self.btn_save_note.pack(side=tk.RIGHT, padx=5, pady=5)
 
     def log_status(self, msg, is_error=False):
         color = "red" if is_error else "black"
@@ -79,6 +89,31 @@ class BookReaderGUI:
         msg = str(error)
         self.log_status(f"Error: {msg}", is_error=True)
         messagebox.showerror(title, msg)
+
+    def save_note(self):
+        """Append user note with current position and timestamp to notes.txt."""
+        if not self.reader: return
+        
+        note_text = self.txt_notes.get("1.0", tk.END).strip()
+        if not note_text:
+            messagebox.showinfo("Note", "Note cannot be empty.")
+            return
+
+        try:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            pos = self.reader.position_info()
+            notes_file = self.reader.scenes_dir / "notes.txt"
+            
+            with open(notes_file, "a", encoding="utf-8") as f:
+                f.write(f"\n--- {timestamp} ---\n")
+                f.write(f"Position: {pos}\n")
+                f.write(f"Note: {note_text}\n")
+                f.write("-" * 20 + "\n")
+            
+            self.txt_notes.delete("1.0", tk.END)
+            self.log_status(f"Note saved to {os.path.basename(notes_file)}")
+        except Exception as e:
+            self.handle_error("Save Note Error", e)
 
     def import_book(self):
         file_path = filedialog.askopenfilename(
@@ -117,6 +152,7 @@ class BookReaderGUI:
             self.btn_play.config(state=tk.NORMAL)
             self.btn_save_bkm.config(state=tk.NORMAL)
             self.btn_load_bkm.config(state=tk.NORMAL)
+            self.btn_save_note.config(state=tk.NORMAL)
             if not self.model and not self.model_loading:
                 self.load_model_async()
         except Exception as e:
