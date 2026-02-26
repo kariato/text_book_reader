@@ -1,0 +1,11 @@
+# CHAPTER XXV — 26 October
+
+_26 October._--Another day and no tidings of the _Czarina Catherine_.
+She ought to be here by now. That she is still journeying _somewhere_ is
+apparent, for Mrs. Harker’s hypnotic report at sunrise was still the
+same. It is possible that the vessel may be lying by, at times, for fog;
+some of the steamers which came in last evening reported patches of fog
+both to north and south of the port. We must continue our watching, as
+the ship may now be signalled any moment.
+
+       *       *       *       *       *

@@ -1,0 +1,3 @@
+# CHAPTER II
+
+JONATHAN HARKER’S JOURNAL--_continued_

@@ -1,0 +1,8 @@
+# CHAPTER VI — 11 a. m
+
+_11 a. m._--The attendant has just been to me to say that Renfield has
+been very sick and has disgorged a whole lot of feathers. “My belief is,
+doctor,” he said, “that he has eaten his birds, and that he just took
+and ate them raw!”
+
+       *       *       *       *       *

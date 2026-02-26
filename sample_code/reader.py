@@ -65,6 +65,7 @@ class Scene:
         self.path    = path
         self.chapter = chapter
         self.scene   = scene
+        self._sentences: list[str] = []
 
     @property
     def label(self) -> str:
@@ -80,6 +81,16 @@ class Scene:
         """Return clean plain-text content suitable for TTS."""
         raw = self.path.read_text(encoding="utf-8")
         return _clean_text(raw)
+
+    def sentences(self) -> list[str]:
+        """Return the scene text split into sentences."""
+        if not self._sentences:
+            text = self.text()
+            # Split on . ! ? followed by whitespace/newline, OR on multiple newlines
+            # We use a lookbehind to keep the punctuation
+            raw_sents = re.split(r'(?<=[.!?])\s+|\n+', text)
+            self._sentences = [s.strip() for s in raw_sents if s.strip()]
+        return self._sentences
 
     def __repr__(self):
         return f"Scene(ch={self.chapter}, sc={self.scene}, path={self.path.name})"
@@ -102,6 +113,7 @@ class BookReader:
         self.progress_file = progress_file or self.DEFAULT_PROGRESS_FILE
         self._scenes: list[Scene] = []
         self._index: int = 0   # current position in the flat scene list
+        self._sentence_index: int = 0  # position within the current scene
 
         self._load_scenes()
         self._restore_progress()
@@ -147,29 +159,34 @@ class BookReader:
     # Progress persistence
     # ------------------------------------------------------------------
 
-    def _restore_progress(self) -> None:
+    def _restore_progress(self, file_path: Path | None = None) -> bool:
         """Load saved position from JSON if it exists."""
-        if not self.progress_file.exists():
-            return
+        target = file_path or self.progress_file
+        if not target.exists():
+            return False
         try:
-            data = json.loads(self.progress_file.read_text())
+            data = json.loads(target.read_text())
             book_key = str(self.scenes_dir.resolve())
             if data.get("book") == book_key and "index" in data:
-                idx = int(data["index"])
-                if 0 <= idx < len(self._scenes):
-                    self._index = idx
-                    print(f"Resuming from: {self.current.label} — {self.current.title()}")
+                self._index = int(data["index"])
+                self._sentence_index = int(data.get("sentence_index", 0))
+                print(f"Resuming from: {self.current.label} — {self.current.title()} (Sentence {self._sentence_index})")
+                return True
         except Exception:
             pass  # corrupt progress file — start from beginning
+        return False
 
-    def save_progress(self) -> None:
+    def save_progress(self, file_path: Path | None = None) -> None:
         """Persist current position to JSON."""
+        target = file_path or self.progress_file
         data = {
             "book":  str(self.scenes_dir.resolve()),
             "index": self._index,
+            "sentence_index": self._sentence_index,
             "label": self.current.label,
+            "scene_title": self.current.title(),
         }
-        self.progress_file.write_text(json.dumps(data, indent=2))
+        target.write_text(json.dumps(data, indent=2))
 
     # ------------------------------------------------------------------
     # Navigation
@@ -180,36 +197,67 @@ class BookReader:
         return self._scenes[self._index]
 
     @property
+    def current_sentence_index(self) -> int:
+        return self._sentence_index
+
+    @current_sentence_index.setter
+    def current_sentence_index(self, value: int):
+        self._sentence_index = value
+
+    @property
     def has_next(self) -> bool:
+        # Has more sentences or has more scenes
+        if self._sentence_index < len(self.current.sentences()) - 1:
+            return True
         return self._index < len(self._scenes) - 1
 
     @property
     def has_prev(self) -> bool:
+        if self._sentence_index > 0:
+            return True
         return self._index > 0
 
+    def next_sentence(self) -> str | None:
+        """Advance to next sentence, moving to next scene if needed."""
+        sents = self.current.sentences()
+        if self._sentence_index < len(sents) - 1:
+            self._sentence_index += 1
+            return sents[self._sentence_index]
+        elif self.has_next_scene():
+            self.next_scene()
+            return self.current.sentences()[0]
+        return None
+
+    def has_next_scene(self) -> bool:
+        return self._index < len(self._scenes) - 1
+
     def next_scene(self) -> Scene | None:
-        if self.has_next:
+        if self.has_next_scene():
             self._index += 1
+            self._sentence_index = 0
             self.save_progress()
             return self.current
         return None
 
     def prev_scene(self) -> Scene | None:
-        if self.has_prev:
+        if self._index > 0:
             self._index -= 1
+            self._sentence_index = 0
             self.save_progress()
             return self.current
         return None
 
-    def go_to(self, chapter: int, scene: int) -> Scene | None:
-        """Jump to a specific chapter/scene. Returns the Scene or None if not found."""
+    def go_to(self, chapter: int, scene: int, sentence: int = 0) -> Scene | None:
+        """Jump to a specific chapter/scene/sentence. Returns the Scene or None if not found."""
         for i, s in enumerate(self._scenes):
             if s.chapter == chapter and s.scene == scene:
                 self._index = i
+                self._sentence_index = sentence
                 self.save_progress()
                 return self.current
         return None
 
     def position_info(self) -> str:
-        total = len(self._scenes)
-        return f"[{self._index + 1}/{total}] {self.current.label}"
+        total_sc = len(self._scenes)
+        total_sent = len(self.current.sentences())
+        return f"[{self._index + 1}/{total_sc}] {self.current.label} | Sent {self._sentence_index + 1}/{total_sent}"

@@ -1,0 +1,246 @@
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+import threading
+import queue
+import os
+import sys
+from pathlib import Path
+
+# Fix imports to find sibling files
+sys.path.insert(0, str(Path(__file__).parent))
+
+from reader import BookReader
+from speaker import load_tts_model, speak_text
+from splitter import BookSplitter
+
+class BookReaderGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Python Book Reader")
+        self.root.geometry("800x600")
+
+        self.reader = None
+        self.model = None
+        self.voice = "af_heart"
+        self.stop_event = threading.Event()
+        self.playing = False
+        self.model_loading = False
+        self.splitter = BookSplitter(verbose=False)
+
+        self._setup_ui()
+
+    def _setup_ui(self):
+        # Top controls
+        ctrl_frame = tk.Frame(self.root)
+        ctrl_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=10)
+
+        self.btn_import = tk.Button(ctrl_frame, text="Import Text Book", command=self.import_book)
+        self.btn_import.pack(side=tk.LEFT, padx=5)
+
+        self.btn_load_book = tk.Button(ctrl_frame, text="Select Scene Folder", command=self.load_book)
+        self.btn_load_book.pack(side=tk.LEFT, padx=5)
+
+        self.btn_play = tk.Button(ctrl_frame, text="Start", command=self.toggle_play, state=tk.DISABLED)
+        self.btn_play.pack(side=tk.LEFT, padx=5)
+
+        self.btn_stop = tk.Button(ctrl_frame, text="Stop", command=self.stop_playback, state=tk.DISABLED)
+        self.btn_stop.pack(side=tk.LEFT, padx=5)
+
+        self.btn_save_bkm = tk.Button(ctrl_frame, text="Save Bookmark", command=self.save_bookmark_dialog, state=tk.DISABLED)
+        self.btn_save_bkm.pack(side=tk.LEFT, padx=5)
+
+        self.btn_load_bkm = tk.Button(ctrl_frame, text="Load Bookmark", command=self.load_bookmark_dialog, state=tk.DISABLED)
+        self.btn_load_bkm.pack(side=tk.LEFT, padx=5)
+
+        # Labels
+        self.lbl_status = tk.Label(self.root, text="Please select a book folder...")
+        self.lbl_status.pack(side=tk.TOP, fill=tk.X, padx=10)
+
+        self.lbl_chapter = tk.Label(self.root, text="", font=("Helvetica", 12, "bold"))
+        self.lbl_chapter.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(10, 0))
+
+        self.lbl_scene = tk.Label(self.root, text="", font=("Helvetica", 10, "italic"))
+        self.lbl_scene.pack(side=tk.TOP, fill=tk.X, padx=10)
+
+        # Scene Text Display
+        self.txt_display = scrolledtext.ScrolledText(self.root, wrap=tk.WORD, font=("Georgia", 12))
+        self.txt_display.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.txt_display.config(state=tk.DISABLED)
+
+    def log_status(self, msg):
+        self.lbl_status.config(text=msg)
+        print(msg)
+
+    def import_book(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Plain Text Book",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+        if not file_path:
+            return
+
+        # Suggest output directory
+        base_dir = Path(file_path).parent
+        default_out = base_dir / (Path(file_path).stem + "_scenes")
+        
+        out_dir = filedialog.askdirectory(
+            title="Select Output Folder for Scenes",
+            initialdir=str(base_dir)
+        )
+        if not out_dir:
+            return
+
+        self.log_status("Splitting book into scenes...")
+        try:
+            # Run splitting in a thread to keep UI responsive
+            def _do_split():
+                try:
+                    self.splitter.split_book(file_path, out_dir)
+                    self.root.after(0, lambda: self._after_import(out_dir))
+                except Exception as e:
+                    self.root.after(0, lambda: messagebox.showerror("Split Error", f"Failed to split book: {e}"))
+
+            threading.Thread(target=_do_split, daemon=True).start()
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not start splitter: {e}")
+
+    def _after_import(self, folder):
+        self.log_status(f"Import complete: {os.path.basename(folder)}")
+        self._load_folder(folder)
+
+    def load_book(self):
+        folder = filedialog.askdirectory(title="Select Book Scenes Folder")
+        if folder:
+            self._load_folder(folder)
+
+    def _load_folder(self, folder):
+        try:
+            self.reader = BookReader(folder)
+            self.update_display()
+            self.log_status(f"Loaded: {os.path.basename(folder)}")
+            self.btn_play.config(state=tk.NORMAL)
+            self.btn_save_bkm.config(state=tk.NORMAL)
+            self.btn_load_bkm.config(state=tk.NORMAL)
+
+            # Proactively load model if not loaded
+            if not self.model and not self.model_loading:
+                self.load_model_async()
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not load book: {e}")
+
+    def update_display(self):
+        if not self.reader: return
+        scene = self.reader.current
+        self.lbl_chapter.config(text=scene.label)
+        self.lbl_scene.config(text=scene.title())
+
+        self.txt_display.config(state=tk.NORMAL)
+        self.txt_display.delete('1.0', tk.END)
+        self.txt_display.insert(tk.END, scene.text())
+        self.txt_display.config(state=tk.DISABLED)
+
+    def load_model_async(self):
+        self.model_loading = True
+        self.log_status("Loading TTS model... (hang tight)")
+
+        def _load():
+            try:
+                self.model = load_tts_model()
+                self.log_status("TTS Model Ready!")
+            except Exception as e:
+                self.log_status(f"Model Load Failed: {e}")
+            finally:
+                self.model_loading = False
+
+        threading.Thread(target=_load, daemon=True).start()
+
+    def toggle_play(self):
+        if not self.model:
+            messagebox.showinfo("Wait", "Model is still loading...")
+            return
+
+        if self.playing:
+            self.stop_playback()
+        else:
+            self.start_playback()
+
+    def start_playback(self):
+        self.playing = True
+        self.stop_event.clear()
+        self.btn_play.config(text="Pause")
+        self.btn_stop.config(state=tk.NORMAL)
+        self.log_status("Reading...")
+
+        def _speak_loop():
+            while self.playing and not self.stop_event.is_set():
+                # Get current sentences from the reader
+                # We use sentences specifically for better stop/resume control
+                scene = self.reader.current
+                sentences = scene.sentences()
+
+                for i in range(self.reader.current_sentence_index, len(sentences)):
+                    if self.stop_event.is_set():
+                        break
+
+                    text = sentences[i]
+                    # Update sentence index in reader
+                    self.reader.current_sentence_index = i
+
+                    # Local stop event for the speech engine
+                    speak_text(self.model, text, voice=self.voice, stop_event=self.stop_event)
+
+                if self.stop_event.is_set():
+                    break
+
+                # Advance to next scene if possible
+                if self.reader.has_next_scene():
+                    self.reader.next_scene()
+                    self.root.after(0, self.update_display)
+                else:
+                    self.log_status("End of Book")
+                    break
+
+            self.playing = False
+            self.root.after(0, self._on_stop)
+
+        threading.Thread(target=_speak_loop, daemon=True).start()
+
+    def _on_stop(self):
+        self.btn_play.config(text="Start")
+        self.btn_stop.config(state=tk.DISABLED)
+        if not self.stop_event.is_set():
+            self.log_status("Stopped.")
+
+    def stop_playback(self):
+        self.stop_event.set()
+        self.playing = False
+        self.log_status("Stopping...")
+
+    def save_bookmark_dialog(self):
+        if not self.reader: return
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON Bookmark", "*.json")],
+            title="Save Bookmark"
+        )
+        if filename:
+            self.reader.save_progress(Path(filename))
+            self.log_status(f"Bookmark saved: {os.path.basename(filename)}")
+
+    def load_bookmark_dialog(self):
+        if not self.reader: return
+        filename = filedialog.askopenfilename(
+            filetypes=[("JSON Bookmark", "*.json")],
+            title="Load Bookmark"
+        )
+        if filename:
+            if self.reader._restore_progress(Path(filename)):
+                self.update_display()
+                self.log_status(f"Bookmark loaded: {os.path.basename(filename)}")
+            else:
+                messagebox.showerror("Error", "Could not load bookmark. Path might be different.")
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = BookReaderGUI(root)
+    root.mainloop()

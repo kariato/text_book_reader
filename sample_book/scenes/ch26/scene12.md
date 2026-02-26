@@ -1,0 +1,15 @@
+# CHAPTER XXVI — 4 November
+
+_4 November._--To-day we heard of the launch having been detained by an
+accident when trying to force a way up the rapids. The Slovak boats get
+up all right, by aid of a rope and steering with knowledge. Some went up
+only a few hours before. Godalming is an amateur fitter himself, and
+evidently it was he who put the launch in trim again. Finally, they got
+up the rapids all right, with local help, and are off on the chase
+afresh. I fear that the boat is not any better for the accident; the
+peasantry tell us that after she got upon smooth water again, she kept
+stopping every now and again so long as she was in sight. We must push
+on harder than ever; our help may be wanted soon.
+
+
+_Mina Harker’s Journal._

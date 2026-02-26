@@ -1,0 +1,10 @@
+# CHAPTER IV — 18 May
+
+_18 May._--I have been down to look at that room again in daylight, for
+I _must_ know the truth. When I got to the doorway at the top of the
+stairs I found it closed. It had been so forcibly driven against the
+jamb that part of the woodwork was splintered. I could see that the bolt
+of the lock had not been shot, but the door is fastened from the inside.
+I fear it was no dream, and must act on this surmise.
+
+       *       *       *       *       *

@@ -1,0 +1,10 @@
+# CHAPTER VI — 10 p. m
+
+_10 p. m._--I have visited him again and found him sitting in a corner
+brooding. When I came in he threw himself on his knees before me and
+implored me to let him have a cat; that his salvation depended upon it.
+I was firm, however, and told him that he could not have it, whereupon
+he went without a word, and sat down, gnawing his fingers, in the corner
+where I had found him. I shall see him in the morning early.
+
+       *       *       *       *       *

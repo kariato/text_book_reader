@@ -1,0 +1,13 @@
+# CHAPTER VI — 20 July
+
+_20 July._--Visited Renfield very early, before the attendant went his
+rounds. Found him up and humming a tune. He was spreading out his sugar,
+which he had saved, in the window, and was manifestly beginning his
+fly-catching again; and beginning it cheerfully and with a good grace. I
+looked around for his birds, and not seeing them, asked him where they
+were. He replied, without turning round, that they had all flown away.
+There were a few feathers about the room and on his pillow a drop of
+blood. I said nothing, but went and told the keeper to report to me if
+there were anything odd about him during the day.
+
+       *       *       *       *       *
