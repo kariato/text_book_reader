@@ -83,13 +83,22 @@ class Scene:
         return _clean_text(raw)
 
     def sentences(self) -> list[str]:
-        """Return the scene text split into sentences."""
+        """Return the scene text split into sentences, filtering non-alphanumeric noise."""
         if not self._sentences:
             text = self.text()
             # Split on . ! ? followed by whitespace/newline, OR on multiple newlines
-            # We use a lookbehind to keep the punctuation
             raw_sents = re.split(r'(?<=[.!?])\s+|\n+', text)
-            self._sentences = [s.strip() for s in raw_sents if s.strip()]
+            
+            cleaned = []
+            for s in raw_sents:
+                s = s.strip()
+                if not s:
+                    continue
+                # Skip strings that contain no alphanumeric characters (e.g. just "---" or "...")
+                if not any(c.isalnum() for c in s):
+                    continue
+                cleaned.append(s)
+            self._sentences = cleaned
         return self._sentences
 
     def __repr__(self):
@@ -125,29 +134,41 @@ class BookReader:
     def _load_scenes(self) -> None:
         """Scan scenes_dir and build a sorted flat list of Scene objects."""
         if not self.scenes_dir.exists():
-            print(f"ERROR: scenes directory not found: {self.scenes_dir}", file=sys.stderr)
-            sys.exit(1)
+            raise FileNotFoundError(f"Scenes directory not found: {self.scenes_dir}")
 
         scenes: list[Scene] = []
+        # Support folders like "ch01" or "ch01_title" or even just "01_title"
         for ch_dir in sorted(self.scenes_dir.iterdir()):
             if not ch_dir.is_dir():
                 continue
-            m = re.match(r"ch(\d+)", ch_dir.name)
+            
+            # Find the first sequence of digits to treat as chapter number
+            m = re.search(r"(\d+)", ch_dir.name)
             if not m:
                 continue
             ch_num = int(m.group(1))
 
-            for sc_file in sorted(
-                ch_dir.glob("scene*.md"),
-                key=lambda p: int(re.search(r"\d+", p.stem).group()),
-            ):
-                sc_m = re.match(r"scene(\d+)", sc_file.stem)
-                if sc_m:
-                    scenes.append(Scene(sc_file, ch_num, int(sc_m.group(1))))
+            # Support any .md file, sorting by digits found in filename
+            sc_files = list(ch_dir.glob("*.md"))
+            if not sc_files:
+                continue
+                
+            def get_sc_num(path):
+                # Try to find the second set of digits if possible (e.g. 01_02_name)
+                # or just the first set if it's "scene1.md"
+                nums = re.findall(r"(\d+)", path.stem)
+                if len(nums) >= 2:
+                    return int(nums[1])
+                elif len(nums) == 1:
+                    return int(nums[0])
+                return 0
+
+            for sc_file in sorted(sc_files, key=get_sc_num):
+                sc_num = get_sc_num(sc_file)
+                scenes.append(Scene(sc_file, ch_num, sc_num))
 
         if not scenes:
-            print(f"ERROR: no scene files found in {self.scenes_dir}", file=sys.stderr)
-            sys.exit(1)
+            raise ValueError(f"No scene files found in {self.scenes_dir}")
 
         self._scenes = scenes
         print(f"Loaded {len(scenes)} scenes across {self._chapter_count()} chapters.")
@@ -227,6 +248,46 @@ class BookReader:
             self.next_scene()
             return self.current.sentences()[0]
         return None
+
+    def get_next_chunk(self, max_chars: int = 500) -> str | None:
+        """
+        Returns a string containing one or more sentences, grouped to be ~max_chars.
+        Always stops at a sentence boundary. Returns None at end of book.
+        Updates internal indices.
+        """
+        if not self.has_next:
+            return None
+
+        sentences = self.current.sentences()
+        
+        # If the index is already at the end of the current scene, advance to next scene
+        if self._sentence_index >= len(sentences):
+            if self.has_next_scene():
+                self.next_scene()
+                sentences = self.current.sentences()
+            else:
+                return None
+
+        chunk_parts = []
+        current_len = 0
+        
+        # Collect sentences until we hit max_chars or end of scene
+        start_idx = self._sentence_index
+        for i in range(start_idx, len(sentences)):
+            sent = sentences[i]
+            # If adding this sentence would exceed max, and we already have content, stop
+            if chunk_parts and (current_len + len(sent) > max_chars):
+                break
+            
+            chunk_parts.append(sent)
+            current_len += len(sent)
+            self._sentence_index += 1
+            
+            # If we just reached the end of the scene, stop and let the next call handle scene transition
+            if self._sentence_index >= len(sentences):
+                break
+        
+        return " ".join(chunk_parts)
 
     def has_next_scene(self) -> bool:
         return self._index < len(self._scenes) - 1

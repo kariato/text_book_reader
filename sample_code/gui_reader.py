@@ -67,9 +67,16 @@ class BookReaderGUI:
         self.txt_display.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.txt_display.config(state=tk.DISABLED)
 
-    def log_status(self, msg):
-        self.lbl_status.config(text=msg)
-        print(msg)
+    def log_status(self, msg, is_error=False):
+        color = "red" if is_error else "black"
+        self.lbl_status.config(text=msg, fg=color)
+        print(f"{'[ERROR] ' if is_error else ''}{msg}")
+
+    def handle_error(self, title, error):
+        """Centralized error handling to show message boxes and log to status."""
+        msg = str(error)
+        self.log_status(f"Error: {msg}", is_error=True)
+        messagebox.showerror(title, msg)
 
     def import_book(self):
         file_path = filedialog.askopenfilename(
@@ -81,7 +88,6 @@ class BookReaderGUI:
 
         # Suggest output directory
         base_dir = Path(file_path).parent
-        default_out = base_dir / (Path(file_path).stem + "_scenes")
         
         out_dir = filedialog.askdirectory(
             title="Select Output Folder for Scenes",
@@ -98,11 +104,11 @@ class BookReaderGUI:
                     self.splitter.split_book(file_path, out_dir)
                     self.root.after(0, lambda: self._after_import(out_dir))
                 except Exception as e:
-                    self.root.after(0, lambda: messagebox.showerror("Split Error", f"Failed to split book: {e}"))
+                    self.root.after(0, lambda: self.handle_error("Split Error", e))
 
             threading.Thread(target=_do_split, daemon=True).start()
         except Exception as e:
-            messagebox.showerror("Error", f"Could not start splitter: {e}")
+            self.handle_error("Error", f"Could not start splitter: {e}")
 
     def _after_import(self, folder):
         self.log_status(f"Import complete: {os.path.basename(folder)}")
@@ -126,18 +132,21 @@ class BookReaderGUI:
             if not self.model and not self.model_loading:
                 self.load_model_async()
         except Exception as e:
-            messagebox.showerror("Error", f"Could not load book: {e}")
+            self.handle_error("Load Error", e)
 
     def update_display(self):
-        if not self.reader: return
-        scene = self.reader.current
-        self.lbl_chapter.config(text=scene.label)
-        self.lbl_scene.config(text=scene.title())
+        try:
+            if not self.reader: return
+            scene = self.reader.current
+            self.lbl_chapter.config(text=scene.label)
+            self.lbl_scene.config(text=scene.title())
 
-        self.txt_display.config(state=tk.NORMAL)
-        self.txt_display.delete('1.0', tk.END)
-        self.txt_display.insert(tk.END, scene.text())
-        self.txt_display.config(state=tk.DISABLED)
+            self.txt_display.config(state=tk.NORMAL)
+            self.txt_display.delete('1.0', tk.END)
+            self.txt_display.insert(tk.END, scene.text())
+            self.txt_display.config(state=tk.DISABLED)
+        except Exception as e:
+            self.handle_error("Display Error", e)
 
     def load_model_async(self):
         self.model_loading = True
@@ -148,7 +157,7 @@ class BookReaderGUI:
                 self.model = load_tts_model()
                 self.log_status("TTS Model Ready!")
             except Exception as e:
-                self.log_status(f"Model Load Failed: {e}")
+                self.root.after(0, lambda: self.handle_error("Model Load Error", e))
             finally:
                 self.model_loading = False
 
@@ -172,36 +181,36 @@ class BookReaderGUI:
         self.log_status("Reading...")
 
         def _speak_loop():
-            while self.playing and not self.stop_event.is_set():
-                # Get current sentences from the reader
-                # We use sentences specifically for better stop/resume control
-                scene = self.reader.current
-                sentences = scene.sentences()
+            try:
+                while self.playing and not self.stop_event.is_set():
+                    # Record current scene to detect transitions
+                    start_scene = self.reader.current
+                    
+                    # Get a chunk of sentences (~500 chars)
+                    text = self.reader.get_next_chunk(max_chars=500)
+                    if text is None:
+                        self.log_status("End of Book")
+                        break
+                        
+                    # If scene changed during get_next_chunk, update display
+                    if self.reader.current != start_scene:
+                        self.root.after(0, self.update_display)
+                    
+                    try:
+                        speak_text(self.model, text, voice=self.voice, stop_event=self.stop_event)
+                    except Exception as e:
+                        self.root.after(0, lambda: self.handle_error("Playback Error", e))
+                        self.stop_event.set()
+                        break
 
-                for i in range(self.reader.current_sentence_index, len(sentences)):
                     if self.stop_event.is_set():
                         break
 
-                    text = sentences[i]
-                    # Update sentence index in reader
-                    self.reader.current_sentence_index = i
-
-                    # Local stop event for the speech engine
-                    speak_text(self.model, text, voice=self.voice, stop_event=self.stop_event)
-
-                if self.stop_event.is_set():
-                    break
-
-                # Advance to next scene if possible
-                if self.reader.has_next_scene():
-                    self.reader.next_scene()
-                    self.root.after(0, self.update_display)
-                else:
-                    self.log_status("End of Book")
-                    break
-
-            self.playing = False
-            self.root.after(0, self._on_stop)
+            except Exception as e:
+                self.root.after(0, lambda: self.handle_error("TTS Loop Error", e))
+            finally:
+                self.playing = False
+                self.root.after(0, self._on_stop)
 
         threading.Thread(target=_speak_loop, daemon=True).start()
 
