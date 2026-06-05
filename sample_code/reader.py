@@ -1,16 +1,19 @@
 """
 reader.py — BookReader: scene loading, navigation, and progress persistence.
 
-Scene directory layout expected:
+Scene directory layouts supported:
     scenes/
         ch01/
             scene1.md
             scene2.md
         ch02/
             scene1.md
-        …
+    Book Title/
+        Chapter 001 - Title/
+            Chapter 001 Scene 001 - Title.txt
+            Chapter 001 Scene 002 - Title.txt
 
-Each .md file has a `# Title` first line, followed by body text.
+Scene files may be Markdown or plain text.
 """
 
 import json
@@ -61,10 +64,11 @@ def _clean_text(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 class Scene:
-    def __init__(self, path: Path, chapter: int, scene: int):
+    def __init__(self, path: Path, chapter: int, scene: int, title: str | None = None):
         self.path    = path
         self.chapter = chapter
         self.scene   = scene
+        self._title  = title
         self._sentences: list[str] = []
 
     @property
@@ -72,10 +76,12 @@ class Scene:
         return f"Chapter {self.chapter}, Scene {self.scene}"
 
     def title(self) -> str:
-        """Return the markdown heading from the first line of the file."""
+        """Return the file heading, filename title, or chapter/scene label."""
         with open(self.path, encoding="utf-8") as f:
             first = f.readline().strip()
-        return first.lstrip("#").strip() or self.label
+        if first.startswith("#"):
+            return first.lstrip("#").strip() or self._title or self.label
+        return self._title or self.label
 
     def text(self) -> str:
         """Return clean plain-text content suitable for TTS."""
@@ -111,8 +117,18 @@ class Scene:
 
 class BookReader:
     """
-    Loads all scenes from a scenes directory, handles navigation,
-    and persists reading position to a JSON file.
+    BookReader: Core Navigation and State Management.
+    
+    This class is responsible for logical traversal of the parsed book. It abstracts away 
+    the raw files into a seamless "Playlist" of `Scene` objects that can be sequentially read.
+    
+    Features:
+    - Lazy Sentence Chunking: Reads and parses markdown scenes on demand, grouping sentences 
+      into ~500 character chunks (`get_next_chunk`) specifically optimized for TTS ingestion limits.
+    - Persistent State: Automatically tracks the user's `_index` (scene) and `_sentence_index` (position within scene).
+                        These are flushed to `target` json files regularly to prevent loss of progress during a crash.
+    - Directory Scanning: Recursively seeks all `*.md` files in a structured `scenes/` layout, 
+                          ordering them numerically regardless of exact directory name strings.
     """
 
     DEFAULT_PROGRESS_FILE = Path.home() / ".book_reader_progress.json"
@@ -132,46 +148,90 @@ class BookReader:
     # ------------------------------------------------------------------
 
     def _load_scenes(self) -> None:
-        """Scan scenes_dir and build a sorted flat list of Scene objects."""
+        """Scan scenes_dir recursively and build a sorted flat list of Scene objects."""
         if not self.scenes_dir.exists():
             raise FileNotFoundError(f"Scenes directory not found: {self.scenes_dir}")
 
         scenes: list[Scene] = []
-        # Support folders like "ch01" or "ch01_title" or even just "01_title"
-        for ch_dir in sorted(self.scenes_dir.iterdir()):
-            if not ch_dir.is_dir():
+        for sc_file in self._scene_files():
+            ch_num = self._chapter_num(sc_file)
+            if ch_num is None:
                 continue
-            
-            # Find the first sequence of digits to treat as chapter number
-            m = re.search(r"(\d+)", ch_dir.name)
-            if not m:
-                continue
-            ch_num = int(m.group(1))
-
-            # Support any .md file, sorting by digits found in filename
-            sc_files = list(ch_dir.glob("*.md"))
-            if not sc_files:
-                continue
-                
-            def get_sc_num(path):
-                # Try to find the second set of digits if possible (e.g. 01_02_name)
-                # or just the first set if it's "scene1.md"
-                nums = re.findall(r"(\d+)", path.stem)
-                if len(nums) >= 2:
-                    return int(nums[1])
-                elif len(nums) == 1:
-                    return int(nums[0])
-                return 0
-
-            for sc_file in sorted(sc_files, key=get_sc_num):
-                sc_num = get_sc_num(sc_file)
-                scenes.append(Scene(sc_file, ch_num, sc_num))
+            sc_num = self._scene_num(sc_file)
+            title = self._title_from_filename(sc_file)
+            scenes.append(Scene(sc_file, ch_num, sc_num, title=title))
 
         if not scenes:
-            raise ValueError(f"No scene files found in {self.scenes_dir}")
+            raise ValueError(
+                f"No scene files found in {self.scenes_dir}. "
+                "Expected .md or .txt files inside chapter folders."
+            )
 
-        self._scenes = scenes
+        self._scenes = sorted(scenes, key=lambda s: (s.chapter, s.scene, str(s.path).lower()))
         print(f"Loaded {len(scenes)} scenes across {self._chapter_count()} chapters.")
+
+    def _scene_files(self) -> list[Path]:
+        """Return supported scene files beneath scenes_dir, excluding sidecar files."""
+        files = []
+        for path in self.scenes_dir.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.name.startswith("."):
+                continue
+            if path.suffix.lower() not in {".md", ".txt"}:
+                continue
+            if path.name.lower() in {"notes.txt"}:
+                continue
+            files.append(path)
+        return files
+
+    def _chapter_num(self, path: Path) -> int | None:
+        """Find the chapter number from the filename first, then parent folders."""
+        m = re.search(r"\bchapter\s+(\d+|[IVXLCDM]+)\b", path.stem, re.IGNORECASE)
+        if m:
+            return self._parse_num(m.group(1))
+
+        for part in reversed(path.relative_to(self.scenes_dir).parts[:-1]):
+            m = re.search(r"(?:\bch(?:apter)?\s*)?(\d+|[IVXLCDM]+)\b", part, re.IGNORECASE)
+            if m:
+                return self._parse_num(m.group(1))
+        return None
+
+    def _scene_num(self, path: Path) -> int:
+        """Find the scene number from common scene filename patterns."""
+        stem = path.stem
+        m = re.search(r"\bscene\s+(\d+|[IVXLCDM]+)\b", stem, re.IGNORECASE)
+        if m:
+            return self._parse_num(m.group(1))
+
+        nums = re.findall(r"(\d+)", stem)
+        if len(nums) >= 2:
+            return int(nums[1])
+        if len(nums) == 1:
+            return int(nums[0])
+        return 1
+
+    def _title_from_filename(self, path: Path) -> str | None:
+        """Convert a scene filename into a readable title fallback."""
+        stem = path.stem
+        stem = re.sub(r"^\s*chapter\s+\d+\s+scene\s+\d+\s*[-–—:]?\s*", "", stem, flags=re.IGNORECASE)
+        stem = re.sub(r"^\s*scene\s+\d+\s*[-–—:]?\s*", "", stem, flags=re.IGNORECASE)
+        return stem.strip(" -–—_:") or None
+
+    def _parse_num(self, value: str) -> int:
+        value = value.strip()
+        if value.isdigit():
+            return int(value)
+
+        vals = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100, "D": 500, "M": 1000}
+        total, prev = 0, 0
+        for ch in reversed(value.upper()):
+            cur = vals.get(ch)
+            if cur is None:
+                return 1
+            total += cur if cur >= prev else -cur
+            prev = cur
+        return total or 1
 
     def _chapter_count(self) -> int:
         return len({s.chapter for s in self._scenes})
@@ -189,8 +249,8 @@ class BookReader:
             data = json.loads(target.read_text())
             book_key = str(self.scenes_dir.resolve())
             if data.get("book") == book_key and "index" in data:
-                self._index = int(data["index"])
-                self._sentence_index = int(data.get("sentence_index", 0))
+                self._index = max(0, min(int(data["index"]), len(self._scenes) - 1))
+                self._sentence_index = max(0, int(data.get("sentence_index", 0)))
                 print(f"Resuming from: {self.current.label} — {self.current.title()} (Sentence {self._sentence_index})")
                 return True
         except Exception:
@@ -255,9 +315,6 @@ class BookReader:
         Always stops at a sentence boundary. Returns None at end of book.
         Updates internal indices.
         """
-        if not self.has_next:
-            return None
-
         sentences = self.current.sentences()
         
         # If the index is already at the end of the current scene, advance to next scene
@@ -267,6 +324,13 @@ class BookReader:
                 sentences = self.current.sentences()
             else:
                 return None
+
+        while not sentences and self.has_next_scene():
+            self.next_scene()
+            sentences = self.current.sentences()
+
+        if not sentences:
+            return None
 
         chunk_parts = []
         current_len = 0

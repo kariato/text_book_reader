@@ -5,10 +5,10 @@ Usage:
     python book_reader.py [scenes_dir] [options]
 
 Options:
-    --voice VOICE       TTS voice ID        (default: af_heart)
+    --voice VOICE       TTS voice name      (default: model default)
     --chapter N         Start at chapter N  (default: resume or 1)
     --scene N           Start at scene N    (default: resume or 1)
-    --model MODEL_ID    HuggingFace model   (default: mlx-community/chatterbox-turbo-fp16)
+    --model MODEL_ID    HuggingFace model   (default: mlx-community/Kokoro-82M-bf16)
 
 Controls during playback:
     Enter   →  Next scene
@@ -28,7 +28,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from reader  import BookReader
-from speaker import load_tts_model, speak_text
+from speaker import (
+    DEFAULT_TTS_MODEL_ID,
+    available_tts_models,
+    available_voices,
+    default_voice_for_model,
+    load_tts_model,
+    speak_text,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -86,14 +93,14 @@ def _print_scene_header(reader: BookReader):
 # Playback
 # ---------------------------------------------------------------------------
 
-def _speak_scene(model, reader: BookReader, voice: str, stop_event: threading.Event):
+def _speak_scene(model, reader: BookReader, voice: str, model_id: str, stop_event: threading.Event):
     """Speak the current scene. Blocks until done or stop_event is set."""
     text = reader.current.text()
     if not text.strip():
         print("  (empty scene, skipping)")
         return
     print(f"\n  Speaking… (s=skip, q=quit)\n")
-    speak_text(model, text, voice=voice, stop_event=stop_event)
+    speak_text(model, text, voice=voice, stop_event=stop_event, model_id=model_id)
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +111,10 @@ def run(scenes_dir: str, voice: str, model_id: str, start_chapter: int | None, s
     print("\n📖  Book Reader  📖")
     print("Loading scenes…")
     reader = BookReader(scenes_dir)
+    if model_id not in available_tts_models():
+        raise ValueError(f"Unsupported model: {model_id}")
+    if voice not in available_voices(model_id):
+        raise ValueError(f"Unsupported voice '{voice}' for {model_id}. Choose from: {available_voices(model_id)}")
 
     # Jump to explicit start position if provided
     if start_chapter is not None:
@@ -126,7 +137,7 @@ def run(scenes_dir: str, voice: str, model_id: str, start_chapter: int | None, s
         # Speak in a background thread so we can accept keyboard input
         speech_thread = threading.Thread(
             target=_speak_scene,
-            args=(model, reader, voice, stop_event),
+            args=(model, reader, voice, model_id, stop_event),
             daemon=True,
         )
         speech_thread.start()
@@ -206,8 +217,8 @@ def main():
         default="sample_book/scenes",
         help="Path to the scenes directory (default: sample_book/scenes)",
     )
-    parser.add_argument("--voice",   default="af_heart",                           help="TTS voice ID")
-    parser.add_argument("--model",   default="mlx-community/chatterbox-turbo-fp16", help="HuggingFace model ID")
+    parser.add_argument("--voice", default=None, help="TTS voice name")
+    parser.add_argument("--model", default=DEFAULT_TTS_MODEL_ID, choices=available_tts_models(), help="HuggingFace model ID")
     parser.add_argument("--chapter", type=int, default=None, help="Start at chapter N")
     parser.add_argument("--scene",   type=int, default=None, help="Start at scene N")
 
@@ -215,7 +226,7 @@ def main():
 
     run(
         scenes_dir=args.scenes_dir,
-        voice=args.voice,
+        voice=args.voice or default_voice_for_model(args.model),
         model_id=args.model,
         start_chapter=args.chapter,
         start_scene=args.scene,

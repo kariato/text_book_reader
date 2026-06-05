@@ -1,0 +1,9 @@
+name: tts
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - ffmpeg
+  - pip
+  - pip:
+      - -r requirements.txt

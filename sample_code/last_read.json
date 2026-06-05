@@ -1,5 +1,7 @@
 {
-  "scenes_dir": "/Volumes/NVME/Source/spreading-insanity/book/scenes",
-  "index": 18,
-  "sentence_index": 16
+  "scenes_dir": "/Volumes/NVME/Source/si2/Spreading Insanity",
+  "index": 17,
+  "sentence_index": 34,
+  "tts_model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16",
+  "tts_voice": "Chelsie"
 }

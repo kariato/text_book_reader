@@ -10,12 +10,16 @@ from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Regex patterns
+# These regexes map out structural heuristics for Project Gutenberg files.
+# Project Gutenberg books follow loose but mostly predictable patterns for
+# marking chapters and starting/ending the actual text block.
 # ---------------------------------------------------------------------------
 
 RE_CHAPTER = re.compile(r"^CHAPTER\s+([IVXLCDM]+|\d+)\s*$", re.IGNORECASE)
 RE_CHAPTER_TOC = re.compile(r"^CHAPTER\s+([IVXLCDM]+|\d+)\s*[.\-—]", re.IGNORECASE)
 RE_ACT = re.compile(r"^ACT\s+([IVXLCDM]+|\d+)\s*$", re.IGNORECASE)
 RE_ACT_TOC = re.compile(r"^\s+ACT\s|^ACT\s+([IVXLCDM]+|\d+)\s*\.", re.IGNORECASE)
+# Journal date format often appears in epistolary novels like Dracula directly before a scene break (e.g., _3 May_)
 RE_JOURNAL_DATE = re.compile(r"^_\d")
 RE_START = re.compile(r"\*{3}\s*START OF THE PROJECT GUTENBERG", re.IGNORECASE)
 RE_END   = re.compile(r"\*{3}\s*END OF THE PROJECT GUTENBERG",   re.IGNORECASE)
@@ -99,6 +103,14 @@ def split_into_scenes(ch_num: int, ch_title: str, lines: list[str]) -> list[tupl
 # ---------------------------------------------------------------------------
 
 class BookSplitter:
+    """
+    BookSplitter: Automates the breakdown of massive .txt books into digestible Markdown scenes.
+    
+    TTS engines and LLMs struggle with massive monolithic files due to token/memory limits.
+    This class ingests a full Project Gutenberg `.txt` book, strips the licensing preamble/postamble, 
+    heuristically detects the structure (Chapters vs Acts), and splits it into discrete `.md` files
+    organized into `scenes/ch01/scene1.md` type directory structures.
+    """
     def __init__(self, verbose: bool = True):
         self.verbose = verbose
 

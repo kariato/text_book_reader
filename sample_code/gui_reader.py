@@ -1,23 +1,59 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 import threading
-import queue
 import os
 import sys
 import time
+import subprocess
+import numpy as np
 from pathlib import Path
+import re
 
 # Fix imports to find sibling files
 sys.path.insert(0, str(Path(__file__).parent))
 
 from reader import BookReader
-from speaker import load_tts_model, BufferedSpeaker
+from speaker import (
+    DEFAULT_TTS_MODEL_ID,
+    INTERNAL_TTS_SUPPORTED,
+    BufferedSpeaker,
+    available_tts_models,
+    available_voices,
+    default_voice_for_model,
+    generation_kwargs,
+    load_tts_model,
+    model_label,
+    play_audio_blocking,
+    synthesize_audio,
+)
 from splitter import BookSplitter
 
 LAST_READ_FILE = Path(__file__).parent / "last_read.json"
 
 class BookReaderGUI:
+    """
+    BookReaderGUI: The primary Tkinter Application for the Text-to-Speech Book Reader.
+    
+    This interface integrates parsing (BookSplitter), navigation (BookReader), and 
+    playback (BufferedSpeaker) into a cohesive Desktop experience.
+    
+    Key Responsibilities:
+    1. UI Layout & State: Manages the Tkinter event loop, drawing controls, and tracking 
+                          the current state (Playing vs Stopped).
+    2. Session Management: Automatically saves and resumes the user's reading position 
+                           (Chapter, Scene, Sentence) and settings (Voice Model).
+    3. Multithreading: Coordinates the gapless TTS background threads to prevent 
+                       the main UI event loop from freezing during intensive audio generation.
+    4. Audio Export: Provides a background daemon (`_export_worker`) that synthesizes and 
+                     encodes TTS text directly to .m4a files using FFmpeg via subprocess pipes.
+    """
     def __init__(self, root):
+        """
+        Initialize the main GUI application.
+        
+        Args:
+            root (tk.Tk): The base Tkinter window instance.
+        """
         self.root = root
         self.root.title("Python Book Reader")
         self.root.geometry("800x800")
@@ -25,10 +61,14 @@ class BookReaderGUI:
         self.reader = None
         self.model = None
         self.speaker = None  # Persistent speaker engine
-        self.voice = "af_heart"
+        self.voice = default_voice_for_model(DEFAULT_TTS_MODEL_ID)
+
         self.stop_event = threading.Event()
         self.playing = False
         self.model_loading = False
+        self.testing_voice = False
+        self._played_index = 0
+        self._played_sentence_index = 0
         self.splitter = BookSplitter(verbose=False)
 
         self._setup_ui()
@@ -60,8 +100,32 @@ class BookReaderGUI:
         self.btn_load_bkm = tk.Button(ctrl_frame, text="Load Bookmark", command=self.load_bookmark_dialog, state=tk.DISABLED)
         self.btn_load_bkm.pack(side=tk.LEFT, padx=5)
 
+        self.btn_export = tk.Button(ctrl_frame, text="Export Audio", command=self.export_audio_dialog, state=tk.DISABLED)
+        self.btn_export.pack(side=tk.LEFT, padx=5)
+
         self.btn_exit = tk.Button(ctrl_frame, text="Exit", command=self.exit_app)
         self.btn_exit.pack(side=tk.RIGHT, padx=5)
+
+        # TTS Configuration Frame
+        tts_frame = tk.LabelFrame(self.root, text="TTS Settings")
+        tts_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
+
+        tk.Label(tts_frame, text="Model:").pack(side=tk.LEFT, padx=5)
+        self.tts_model_var = tk.StringVar(value=DEFAULT_TTS_MODEL_ID)
+        models = available_tts_models()
+        self.om_model = tk.OptionMenu(tts_frame, self.tts_model_var, *models, command=self.on_model_changed)
+        self.om_model.pack(side=tk.LEFT)
+
+        tk.Label(tts_frame, text="Voice:").pack(side=tk.LEFT, padx=(15, 5))
+        self.tts_voice_var = tk.StringVar(value=self.voice)
+        self.om_voice = tk.OptionMenu(tts_frame, self.tts_voice_var, *available_voices(self.tts_model_var.get()), command=self.on_voice_changed)
+        self.om_voice.pack(side=tk.LEFT)
+
+        self.btn_test_voice = tk.Button(tts_frame, text="Test Voice", command=self.test_voice, state=tk.DISABLED)
+        self.btn_test_voice.pack(side=tk.LEFT, padx=(15, 5))
+
+        self.lbl_wpm = tk.Label(tts_frame, text="Generation WPM: --")
+        self.lbl_wpm.pack(side=tk.LEFT, padx=5)
 
         # Navigation Controls
         nav_frame = tk.Frame(self.root)
@@ -111,6 +175,38 @@ class BookReaderGUI:
         self.txt_recent_notes = scrolledtext.ScrolledText(recent_frame, height=8, font=("Helvetica", 10), wrap=tk.WORD)
         self.txt_recent_notes.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.txt_recent_notes.config(state=tk.DISABLED)
+
+    def on_model_changed(self, *args):
+        if self.playing:
+            self.stop_playback(silent=True)
+        self._refresh_voice_options()
+        if INTERNAL_TTS_SUPPORTED:
+            self.load_model_async()
+
+    def on_voice_changed(self, *args):
+        self.voice = self.tts_voice_var.get()
+        if self.speaker:
+            self.speaker.set_voice(self.voice)
+        self.save_session()
+
+    def _refresh_voice_options(self, preferred_voice=None):
+        model_id = self.tts_model_var.get()
+        if model_id not in available_tts_models():
+            model_id = DEFAULT_TTS_MODEL_ID
+            self.tts_model_var.set(model_id)
+        voices = available_voices(model_id)
+        voice = preferred_voice or self.tts_voice_var.get()
+        if voice not in voices:
+            voice = default_voice_for_model(model_id)
+
+        menu = self.om_voice["menu"]
+        menu.delete(0, "end")
+        for option in voices:
+            menu.add_command(label=option, command=tk._setit(self.tts_voice_var, option, self.on_voice_changed))
+        self.tts_voice_var.set(voice)
+        self.voice = voice
+        if self.speaker:
+            self.speaker.set_voice(voice)
 
     def log_status(self, msg, is_error=False):
         color = "red" if is_error else "black"
@@ -205,12 +301,15 @@ class BookReaderGUI:
     def _load_folder(self, folder):
         try:
             self.reader = BookReader(folder)
+            self._mark_played_position()
             self.update_display()
             self.log_status(f"Loaded: {os.path.basename(folder)}")
             self.btn_play.config(state=tk.NORMAL)
             self.btn_save_bkm.config(state=tk.NORMAL)
             self.btn_load_bkm.config(state=tk.NORMAL)
             self.btn_save_note.config(state=tk.NORMAL)
+            self.btn_export.config(state=tk.NORMAL)
+            self.btn_test_voice.config(state=tk.NORMAL)
             
             self.btn_prev_ch.config(state=tk.NORMAL)
             self.btn_prev_sc.config(state=tk.NORMAL)
@@ -219,7 +318,10 @@ class BookReaderGUI:
             
             self.update_notes_display()
             
-            if not self.model and not self.model_loading:
+            if not self.speaker:
+                self.init_speaker()
+            
+            if not self.model and not self.model_loading and INTERNAL_TTS_SUPPORTED:
                 self.load_model_async()
         except Exception as e:
             self.handle_error("Load Error", e)
@@ -236,22 +338,49 @@ class BookReaderGUI:
             self.txt_display.delete('1.0', tk.END)
             self.txt_display.insert(tk.END, s.text())
             self.txt_display.config(state=tk.DISABLED)
+            if scene is None and not self.playing:
+                self._mark_played_position()
         except Exception as e:
             self.handle_error("Display Error", e)
 
+    def _mark_played_position(self, index=None, sentence_index=None):
+        """Track the last position that was displayed or started playback."""
+        if not self.reader:
+            return
+        self._played_index = self.reader._index if index is None else index
+        self._played_sentence_index = self.reader._sentence_index if sentence_index is None else sentence_index
+
     def load_model_async(self):
         self.model_loading = True
-        self.log_status("Loading TTS model... (hang tight)")
+        model_id = self.tts_model_var.get()
+        if model_id not in available_tts_models():
+            model_id = DEFAULT_TTS_MODEL_ID
+            self.tts_model_var.set(model_id)
+        voice = self.tts_voice_var.get()
+        self.log_status(f"Loading TTS model {model_label(model_id)}... (hang tight)")
         def _load():
             try:
-                self.model = load_tts_model()
-                self.speaker = BufferedSpeaker(self.model, voice=self.voice)
+                self.model = load_tts_model(model_id)
+                if not self.speaker:
+                    self.speaker = BufferedSpeaker(self.model, voice=voice, model_id=model_id)
+                else:
+                    self.speaker.set_model(self.model, model_id, voice)
                 self.log_status("TTS Model Ready!")
             except Exception as e:
                 self.root.after(0, lambda: self.handle_error("Model Load Error", e))
             finally:
                 self.model_loading = False
+                if self.speaker:
+                    self.speaker.set_model(self.model, model_id, voice)
         threading.Thread(target=_load, daemon=True).start()
+
+    def init_speaker(self):
+        """Initialize the speaker engine with current settings."""
+        try:
+            model_id = self.tts_model_var.get()
+            self.speaker = BufferedSpeaker(model=self.model, voice=self.voice, model_id=model_id)
+        except Exception as e:
+            self.handle_error("Speaker Init Error", e)
 
     def toggle_play(self):
         if not self.model:
@@ -264,6 +393,9 @@ class BookReaderGUI:
         if not self.speaker:
             self.handle_error("Error", "Speaker engine not ready.")
             return
+        if self.speaker.playback_error:
+            self.handle_error("Playback Error", self.speaker.playback_error)
+            return
 
         self.playing = True
         self.stop_event.clear()
@@ -275,14 +407,18 @@ class BookReaderGUI:
             try:
                 # Pump first few chunks to get the 4-buffer synthesis working immediately
                 while self.playing and not self.stop_event.is_set():
+                    if self.speaker.playback_error:
+                        raise RuntimeError(f"Playback failed: {self.speaker.playback_error}")
                     scene = self.reader.current
+                    start_index = self.reader._index
+                    start_sentence_index = self.reader._sentence_index
                     text = self.reader.get_next_chunk(max_chars=500)
                     if text is None:
                         self.log_status("End of Book Reached")
                         break
                     
-                    def _on_play(s=scene):
-                        self.root.after(0, lambda: self._sync_ui_to_scene(s))
+                    def _on_play(s=scene, idx=start_index, sent_idx=start_sentence_index):
+                        self.root.after(0, lambda: self._sync_ui_to_scene(s, idx, sent_idx))
                     
                     self.speaker.feed(text, callback=_on_play)
                     
@@ -296,9 +432,10 @@ class BookReaderGUI:
         
         threading.Thread(target=_feeder, daemon=True).start()
 
-    def _sync_ui_to_scene(self, scene):
+    def _sync_ui_to_scene(self, scene, index, sentence_index):
         """Update UI to match what is currently playing."""
         if not self.playing: return
+        self._mark_played_position(index, sentence_index)
         self.update_display(scene)
 
     def _on_stop(self):
@@ -324,8 +461,10 @@ class BookReaderGUI:
             import json
             data = {
                 "scenes_dir": str(self.reader.scenes_dir.resolve()),
-                "index": self.reader._index,
-                "sentence_index": self.reader._sentence_index
+                "index": self._played_index,
+                "sentence_index": self._played_sentence_index,
+                "tts_model": self.tts_model_var.get(),
+                "tts_voice": self.tts_voice_var.get(),
             }
             LAST_READ_FILE.write_text(json.dumps(data, indent=2))
         except Exception as e:
@@ -337,14 +476,21 @@ class BookReaderGUI:
         try:
             import json
             data = json.loads(LAST_READ_FILE.read_text())
+            
+            if "tts_model" in data:
+                saved_model = data["tts_model"]
+                if saved_model not in available_tts_models():
+                    saved_model = DEFAULT_TTS_MODEL_ID
+                self.tts_model_var.set(saved_model)
+                self._refresh_voice_options(data.get("tts_voice"))
+
             folder = data.get("scenes_dir")
             if folder and os.path.isdir(folder):
                 self._load_folder(folder)
-                # Position is restored by BookReader's default progress file if it matches,
-                # but we can force it here if they differ.
                 if self.reader:
                     self.reader._index = data.get("index", 0)
                     self.reader._sentence_index = data.get("sentence_index", 0)
+                    self._mark_played_position()
                     self.update_display()
         except Exception as e:
             print(f"Error loading session: {e}")
@@ -407,6 +553,179 @@ class BookReaderGUI:
                 self.log_status(f"Bookmark loaded: {os.path.basename(filename)}")
             else:
                 messagebox.showerror("Error", "Could not load bookmark. Path might be different.")
+
+    def export_audio_dialog(self):
+        if not self.reader: return
+        if not self.model:
+            messagebox.showerror("Export Error", "Export is currently only supported with local MLX models. Please load an internal model first.")
+            return
+
+        out_dir = filedialog.askdirectory(title="Select Output Directory for Audio Files", initialdir=str(self.reader.scenes_dir.parent))
+        if not out_dir: return
+
+        self.btn_export.config(state=tk.DISABLED)
+        self.btn_play.config(state=tk.DISABLED)
+        self.stop_playback(silent=True)
+        self.btn_stop.config(state=tk.NORMAL)
+        self.stop_event.clear()
+        
+        self.log_status(f"Starting export to {os.path.basename(out_dir)}...")
+        threading.Thread(target=self._export_worker, args=(Path(out_dir),), daemon=True).start()
+
+    def _export_worker(self, out_dir):
+        try:
+            export_reader = BookReader(self.reader.scenes_dir)
+            export_reader._index = self.reader._index
+            export_reader._sentence_index = self.reader._sentence_index
+            
+            remaining_scenes = export_reader._scenes[export_reader._index:]
+            if not remaining_scenes:
+                self.root.after(0, lambda: self.log_status("No scenes to export."))
+                return
+
+            chapters = {}
+            for sc in remaining_scenes:
+                chapters.setdefault(sc.chapter, []).append(sc)
+
+            sr = 24000
+            if hasattr(self.speaker, 'sr'):
+                sr = self.speaker.sr
+
+            total_chapters = len(chapters)
+            for idx, (ch_num, sc_list) in enumerate(chapters.items(), 1):
+                if self.stop_event.is_set():
+                    break
+
+                outfile = out_dir / f"Chapter_{ch_num}.m4a"
+                self.root.after(0, lambda c=ch_num, i=idx, t=total_chapters: self.log_status(f"Exporting Chapter {c} ({i}/{t})..."))
+
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "f32le",
+                    "-ar", str(sr),
+                    "-ac", "1",
+                    "-i", "pipe:0",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    str(outfile)
+                ]
+                
+                process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                try:
+                    for sc in sc_list:
+                        if self.stop_event.is_set():
+                            break
+                        sc_idx = export_reader._scenes.index(sc)
+                        if export_reader._index != sc_idx:
+                            export_reader._index = sc_idx
+                            export_reader._sentence_index = 0
+                            
+                        while export_reader._index == sc_idx and export_reader._sentence_index < len(export_reader._scenes[sc_idx].sentences()):
+                            if self.stop_event.is_set():
+                                break
+                            sent_idx = export_reader._sentence_index
+                            total_sents = len(export_reader._scenes[sc_idx].sentences())
+                            self.root.after(0, lambda c=ch_num, s=sent_idx, t=total_sents: self.log_status(f"Exporting Chapter {c}... ({s}/{t} sentences)"))
+                            
+                            text = export_reader.get_next_chunk(max_chars=500)
+                            if not text:
+                                break
+                            
+                            def _update_ui(t=text, s_scene=sc):
+                                self.lbl_chapter.config(text=f"Exporting {s_scene.label}")
+                                self.lbl_scene.config(text=s_scene.title())
+                                self.txt_display.config(state=tk.NORMAL)
+                                self.txt_display.delete('1.0', tk.END)
+                                self.txt_display.insert(tk.END, t)
+                                self.txt_display.config(state=tk.DISABLED)
+                            self.root.after(0, _update_ui)
+
+                            for result in self.model.generate(text, **generation_kwargs(self.tts_model_var.get(), self.tts_voice_var.get())):
+                                if self.stop_event.is_set():
+                                    break
+                                chunk = np.array(result.audio).reshape(-1).astype(np.float32)
+                                peak = np.max(np.abs(chunk)) + 1e-9
+                                if peak > 1.0: chunk = chunk / peak
+                                
+                                if process.stdin:
+                                    process.stdin.write(chunk.tobytes())
+                finally:
+                    if process.stdin:
+                        process.stdin.close()
+                    stderr = process.stderr.read() if process.stderr else b""
+                    process.wait()
+                    if process.returncode != 0:
+                        err = stderr.decode("utf-8", errors="replace").strip()
+                        raise RuntimeError(f"ffmpeg failed for {outfile.name}: {err or f'exit code {process.returncode}'}")
+
+            if self.stop_event.is_set():
+                self.root.after(0, lambda: self.log_status("Export Cancelled."))
+            else:
+                self.root.after(0, lambda: self.log_status("Export Complete!"))
+            
+        except Exception as e:
+            self.root.after(0, lambda: self.handle_error("Export Error", e))
+        finally:
+            self.root.after(0, lambda: self.btn_export.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.btn_play.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.btn_stop.config(state=tk.DISABLED))
+
+    def _first_book_words(self, limit=300):
+        if not self.reader:
+            return ""
+
+        words = []
+        for scene in self.reader._scenes:
+            words.extend(re.findall(r"\S+", scene.text()))
+            if len(words) >= limit:
+                break
+        return " ".join(words[:limit])
+
+    def test_voice(self):
+        if not self.reader:
+            messagebox.showinfo("Test Voice", "Load a scene folder first.")
+            return
+        if self.playing:
+            self.stop_playback(silent=True)
+        if self.model_loading:
+            messagebox.showinfo("Wait", "Model is still loading...")
+            return
+        if not self.model:
+            self.load_model_async()
+            messagebox.showinfo("Wait", "Model is loading. Try Test Voice again once it is ready.")
+            return
+        if self.testing_voice:
+            return
+
+        text = self._first_book_words(300)
+        if not text:
+            messagebox.showinfo("Test Voice", "No readable text found in the loaded book.")
+            return
+
+        model_id = self.tts_model_var.get()
+        voice = self.tts_voice_var.get()
+        word_count = len(re.findall(r"\S+", text))
+        self.testing_voice = True
+        self.btn_test_voice.config(state=tk.DISABLED)
+        self.lbl_wpm.config(text="Generation WPM: ...")
+        self.log_status(f"Testing {model_label(model_id)} / {voice} on {word_count} words...")
+
+        def _run():
+            try:
+                audio, elapsed = synthesize_audio(self.model, text, model_id, voice)
+                wpm = (word_count / elapsed) * 60 if elapsed else 0
+                self.root.after(0, lambda: self.lbl_wpm.config(text=f"Generation WPM: {wpm:.0f}"))
+                self.root.after(0, lambda: self.log_status(f"Generated {word_count} words in {elapsed:.1f}s ({wpm:.0f} WPM). Playing test..."))
+                play_audio_blocking(audio, self.speaker.sr if self.speaker else 24000)
+                self.root.after(0, lambda: self.log_status("Voice test complete."))
+            except Exception as e:
+                self.root.after(0, lambda: self.handle_error("Test Voice Error", e))
+            finally:
+                self.testing_voice = False
+                self.root.after(0, lambda: self.btn_test_voice.config(state=tk.NORMAL if self.reader else tk.DISABLED))
+
+        threading.Thread(target=_run, daemon=True).start()
+
 
 if __name__ == "__main__":
     root = tk.Tk()

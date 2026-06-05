@@ -7,20 +7,25 @@ A suite of tools to split Project Gutenberg texts into scenes and read them alou
 -   **Book Splitter**: Automatically detects chapter/act structure and splits long text files into Markdown scene files.
 -   **Terminal Reader**: CLI-based reader with session persistence and keyboard navigation.
 -   **GUI Reader**: Tkinter-based application with folder selection, start/stop controls, and custom bookmark saving.
--   **Streaming TTS**: Low-latency audio synthesis using `mlx-community/chatterbox-turbo-fp16`.
+-   **Streaming TTS**: MLX-based audio synthesis using Kokoro, Qwen3, and Chatterbox model options.
 
 ## Installation
 
 1.  Ensure you have [Miniforge](https://github.com/conda-forge/miniforge) installed.
 2.  Create and activate the specialized TTS environment:
     ```bash
-    conda create -n tts python=3.12
+    conda env create -f environment.yml
     conda activate tts
     ```
-3.  Install dependencies:
+3.  If you already have the environment, update Python dependencies with:
     ```bash
-    pip install mlx-audio sounddevice numpy pytest
+    pip install -r requirements.txt
     ```
+
+The GUI audio export uses `ffmpeg`, included in `environment.yml`.
+
+Model downloads are stored under `/Volumes/NVME/Source/tts/huggingface`
+instead of the default home-directory Hugging Face cache.
 
 ## Usage
 
@@ -36,6 +41,8 @@ Launch the graphical interface to browse scenes and listen:
 python sample_code/gui_reader.py
 ```
 -   Click **Select Book Folder** and point to `sample_book/scenes`.
+-   Choose a TTS model and, where supported, a voice from the TTS Settings controls.
+-   Click **Test Voice** to generate and play the first 300 words of the loaded book; the GUI displays generation words per minute after synthesis.
 -   Click **Start** to begin reading.
 -   Use **Save Bookmark** to persist your exact position in a scene to a file.
 

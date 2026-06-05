@@ -3,6 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# OS metadata and generated local audio
+.DS_Store
+test_out.m4a
+manual_tests/tts_bakeoff_output/
+
 # C extensions
 *.so
 

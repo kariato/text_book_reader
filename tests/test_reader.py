@@ -11,10 +11,10 @@ def test_clean_text():
     assert "[Illustration" not in cleaned
     assert "Bistritz. —" in cleaned
 
-def test_scene_sentences():
+def test_scene_sentences(tmp_path):
     # Mock a scene file
     content = "# Test\nThis is sentence one. This is sentence two! And three?"
-    path = Path("test_scene.md")
+    path = tmp_path / "test_scene.md"
     path.write_text(content, encoding="utf-8")
     
     scene = Scene(path, 1, 1)
@@ -26,8 +26,6 @@ def test_scene_sentences():
     assert sents[1] == "This is sentence one."
     assert sents[2] == "This is sentence two!"
     assert sents[3] == "And three?"
-    
-    path.unlink()
 
 def test_reader_navigation(tmp_path):
     # Setup dummy scenes structure
@@ -47,6 +45,43 @@ def test_reader_navigation(tmp_path):
     
     assert reader.current.scene == 2
     assert reader.current_sentence_index == 0
+
+def test_reader_loads_nested_txt_scene_tree(tmp_path):
+    book_dir = tmp_path / "si2" / "Spreading Insanity"
+    ch02 = book_dir / "Chapter 002 - Boones Creek"
+    ch01 = book_dir / "Chapter 001 - The Flight"
+    ch02.mkdir(parents=True)
+    ch01.mkdir(parents=True)
+
+    (ch02 / "Chapter 002 Scene 002 - The Square.txt").write_text(
+        "The square was quiet.", encoding="utf-8"
+    )
+    (ch01 / "Chapter 001 Scene 001 - Above The Fields.txt").write_text(
+        "## Scene: Above the Fields\n\nThe helicopter thumped low.", encoding="utf-8"
+    )
+    (ch02 / "notes.txt").write_text("reader sidecar", encoding="utf-8")
+
+    reader = BookReader(tmp_path / "si2", progress_file=tmp_path / "progress.json")
+
+    assert len(reader._scenes) == 2
+    assert reader.current.chapter == 1
+    assert reader.current.scene == 1
+    assert reader.current.title() == "Scene: Above the Fields"
+    reader.next_scene()
+    assert reader.current.chapter == 2
+    assert reader.current.scene == 2
+    assert reader.current.title() == "The Square"
+
+def test_get_next_chunk_reads_single_sentence_book(tmp_path):
+    scenes_dir = tmp_path / "scenes"
+    ch01 = scenes_dir / "ch01"
+    ch01.mkdir(parents=True)
+    (ch01 / "scene1.md").write_text("# S1\nOnly sentence.", encoding="utf-8")
+
+    reader = BookReader(scenes_dir, progress_file=tmp_path / "progress.json")
+
+    assert reader.get_next_chunk() == "S1 Only sentence."
+    assert reader.get_next_chunk() is None
 
 def test_bookmark_persistence(tmp_path):
     scenes_dir = tmp_path / "scenes"

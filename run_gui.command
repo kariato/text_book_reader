@@ -5,6 +5,12 @@ PROJECT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Path to the specialized TTS python environment
 PYTHON_EXE="/Users/kariatoo/miniforge3/envs/tts/bin/python"
+TTS_CACHE_ROOT="/Volumes/NVME/Source/tts"
+
+export HF_HOME="$TTS_CACHE_ROOT/huggingface"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+export HF_HUB_CACHE="$HF_HOME/hub"
+export TRANSFORMERS_CACHE="$HF_HOME/transformers"
 
 # Check if environment exists
 if [ ! -f "$PYTHON_EXE" ]; then
