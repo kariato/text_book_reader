@@ -31,6 +31,8 @@ from splitter import BookSplitter
 
 LAST_READ_FILE = Path(__file__).parent / "last_read.json"
 EXPORT_MODES = ("Chapter", "Scene")
+EXPORT_BITRATES = tuple(f"{rate}k" for rate in range(32, 129, 16))
+DEFAULT_EXPORT_BITRATE = "64k"
 M4A_EXPORT_RE = re.compile(r"^Chapter_(\d+)(?:_Scene_(\d+))?\.m4a$", re.IGNORECASE)
 
 
@@ -56,6 +58,13 @@ def export_units_for_scenes(scenes, mode: str):
     for ch_num, sc_list in chapters.items():
         units.append((f"Chapter {ch_num}", f"Chapter_{ch_num:03d}.m4a", sc_list))
     return units
+
+
+def normalized_export_bitrate(bitrate: str) -> str:
+    """Return a supported export bitrate, falling back to the default."""
+    if bitrate in EXPORT_BITRATES:
+        return bitrate
+    return DEFAULT_EXPORT_BITRATE
 
 
 def exported_m4a_sort_key(path: Path):
@@ -275,6 +284,11 @@ class BookReaderGUI:
         self.export_mode_var = tk.StringVar(value="Chapter")
         self.om_export_mode = tk.OptionMenu(tts_frame, self.export_mode_var, *EXPORT_MODES)
         self.om_export_mode.pack(side=tk.LEFT)
+
+        tk.Label(tts_frame, text="Quality:").pack(side=tk.LEFT, padx=(15, 5))
+        self.export_bitrate_var = tk.StringVar(value=DEFAULT_EXPORT_BITRATE)
+        self.om_export_bitrate = tk.OptionMenu(tts_frame, self.export_bitrate_var, *EXPORT_BITRATES)
+        self.om_export_bitrate.pack(side=tk.LEFT)
 
         self.btn_test_voice = tk.Button(tts_frame, text="Test Voice", command=self.test_voice, state=tk.DISABLED)
         self.btn_test_voice.pack(side=tk.LEFT, padx=(15, 5))
@@ -753,11 +767,14 @@ class BookReaderGUI:
         self.stop_event.clear()
         
         export_mode = self.export_mode_var.get()
-        self.log_status(f"Starting {export_mode.lower()} export to {os.path.basename(out_dir)}...")
-        threading.Thread(target=self._export_worker, args=(Path(out_dir), export_mode), daemon=True).start()
+        export_bitrate = normalized_export_bitrate(self.export_bitrate_var.get())
+        self.export_bitrate_var.set(export_bitrate)
+        self.log_status(f"Starting {export_mode.lower()} export at {export_bitrate} to {os.path.basename(out_dir)}...")
+        threading.Thread(target=self._export_worker, args=(Path(out_dir), export_mode, export_bitrate), daemon=True).start()
 
-    def _export_worker(self, out_dir, export_mode="Chapter"):
+    def _export_worker(self, out_dir, export_mode="Chapter", export_bitrate=DEFAULT_EXPORT_BITRATE):
         try:
+            export_bitrate = normalized_export_bitrate(export_bitrate)
             export_reader = BookReader(self.reader.scenes_dir)
             export_reader._index = self.reader._index
             export_reader._sentence_index = self.reader._sentence_index
@@ -788,7 +805,7 @@ class BookReaderGUI:
                     "-ac", "1",
                     "-i", "pipe:0",
                     "-c:a", "aac",
-                    "-b:a", "128k",
+                    "-b:a", export_bitrate,
                     str(outfile)
                 ]
                 

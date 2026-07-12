@@ -4,9 +4,12 @@ from types import SimpleNamespace
 import pytest
 
 from sample_code.gui_reader import (
+    DEFAULT_EXPORT_BITRATE,
+    EXPORT_BITRATES,
     exported_m4a_files,
     exported_m4a_marker_title,
     export_units_for_scenes,
+    normalized_export_bitrate,
 )
 
 
@@ -82,3 +85,14 @@ def test_exported_m4a_files_sort_chapter_exports(tmp_path):
 def test_exported_m4a_marker_title_uses_export_filename():
     assert exported_m4a_marker_title(Path("Chapter_001.m4a")) == "Chapter 1"
     assert exported_m4a_marker_title(Path("Chapter_001_Scene_002.m4a")) == "Chapter 1, Scene 2"
+
+
+def test_export_bitrate_options_are_32k_to_128k_in_16k_steps():
+    assert EXPORT_BITRATES == ("32k", "48k", "64k", "80k", "96k", "112k", "128k")
+    assert DEFAULT_EXPORT_BITRATE == "64k"
+
+
+def test_normalized_export_bitrate_rejects_unknown_values():
+    assert normalized_export_bitrate("32k") == "32k"
+    assert normalized_export_bitrate("128k") == "128k"
+    assert normalized_export_bitrate("44k") == DEFAULT_EXPORT_BITRATE

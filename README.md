@@ -76,8 +76,9 @@ Then:
 2. Choose a TTS model and voice.
 3. Use **Start**, **Stop**, and the chapter/scene navigation buttons to listen.
 4. Choose **Export: Chapter** or **Export: Scene**.
-5. Click **Export Audio** and choose an output directory.
-6. Click **Combine M4A** to merge exported files into one marked audiobook `.m4a`.
+5. Choose **Quality** from `32k` through `128k` in 16k steps. Lower values make smaller voice files; higher values preserve more detail.
+6. Click **Export Audio** and choose an output directory.
+7. Click **Combine M4A** to merge exported files into one marked audiobook `.m4a`.
 
 ## Export Formats
 
@@ -98,6 +99,14 @@ Chapter_002_Scene_001.m4a
 ```
 
 **Combine M4A** reads those filenames in numeric order and creates one `.m4a` with markers named from the source files, such as `Chapter 1` or `Chapter 1, Scene 2`.
+
+Export quality controls the AAC bitrate passed to ffmpeg:
+
+```text
+32k, 48k, 64k, 80k, 96k, 112k, 128k
+```
+
+The default is `64k`, which is a compact voice-friendly setting.
 
 ## CLI Reader
 
