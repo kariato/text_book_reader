@@ -42,6 +42,8 @@ python sample_code/gui_reader.py
 ```
 -   Click **Select Book Folder** and point to `sample_book/scenes`.
 -   Choose a TTS model and, where supported, a voice from the TTS Settings controls.
+-   Choose **Export: Chapter** for one `.m4a` per chapter, or **Export: Scene** for one `.m4a` per scene.
+-   Use **Combine M4A** to merge exported `.m4a` files into a single `.m4a` with one marker per source file.
 -   Click **Test Voice** to generate and play the first 300 words of the loaded book; the GUI displays generation words per minute after synthesis.
 -   Click **Start** to begin reading.
 -   Use **Save Bookmark** to persist your exact position in a scene to a file.

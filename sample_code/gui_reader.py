@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import subprocess
+import tempfile
 import numpy as np
 from pathlib import Path
 import re
@@ -29,6 +30,152 @@ from speaker import (
 from splitter import BookSplitter
 
 LAST_READ_FILE = Path(__file__).parent / "last_read.json"
+EXPORT_MODES = ("Chapter", "Scene")
+M4A_EXPORT_RE = re.compile(r"^Chapter_(\d+)(?:_Scene_(\d+))?\.m4a$", re.IGNORECASE)
+
+
+def export_units_for_scenes(scenes, mode: str):
+    """Return export work units as (label, filename, scenes) tuples."""
+    if mode not in EXPORT_MODES:
+        raise ValueError(f"Unsupported export mode: {mode}")
+
+    if mode == "Scene":
+        return [
+            (
+                f"Chapter {sc.chapter}, Scene {sc.scene}",
+                f"Chapter_{sc.chapter:03d}_Scene_{sc.scene:03d}.m4a",
+                [sc],
+            )
+            for sc in scenes
+        ]
+
+    units = []
+    chapters = {}
+    for sc in scenes:
+        chapters.setdefault(sc.chapter, []).append(sc)
+    for ch_num, sc_list in chapters.items():
+        units.append((f"Chapter {ch_num}", f"Chapter_{ch_num:03d}.m4a", sc_list))
+    return units
+
+
+def exported_m4a_sort_key(path: Path):
+    """Sort current exporter filenames by chapter, then scene."""
+    match = M4A_EXPORT_RE.match(path.name)
+    if match:
+        chapter = int(match.group(1))
+        scene = int(match.group(2) or 0)
+        return (0, chapter, scene, path.name.lower())
+    return (1, path.name.lower())
+
+
+def exported_m4a_marker_title(path: Path) -> str:
+    """Return a readable marker title from an exported m4a filename."""
+    match = M4A_EXPORT_RE.match(path.name)
+    if not match:
+        return path.stem.replace("_", " ")
+
+    chapter = int(match.group(1))
+    scene = match.group(2)
+    if scene:
+        return f"Chapter {chapter}, Scene {int(scene)}"
+    return f"Chapter {chapter}"
+
+
+def exported_m4a_files(input_dir: str | Path) -> list[Path]:
+    """Return m4a files in the same numeric order as the TTS exporter."""
+    folder = Path(input_dir)
+    if not folder.is_dir():
+        raise NotADirectoryError(f"Audio directory not found: {folder}")
+    return sorted(folder.glob("*.m4a"), key=exported_m4a_sort_key)
+
+
+def _ffmetadata_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("=", "\\=").replace(";", "\\;").replace("#", "\\#").replace("\n", " ")
+
+
+def _ffconcat_quote(path: Path) -> str:
+    return str(path.resolve()).replace("'", "'\\''")
+
+
+def _probe_duration_seconds(path: Path) -> float:
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return float(result.stdout.strip())
+
+
+def _write_marked_m4a_metadata(files: list[Path], metadata_file: Path) -> None:
+    current_ms = 0
+    lines = [";FFMETADATA1"]
+    for audio_file in files:
+        duration_ms = max(1, round(_probe_duration_seconds(audio_file) * 1000))
+        end_ms = current_ms + duration_ms
+        lines.extend(
+            [
+                "",
+                "[CHAPTER]",
+                "TIMEBASE=1/1000",
+                f"START={current_ms}",
+                f"END={end_ms}",
+                f"title={_ffmetadata_escape(exported_m4a_marker_title(audio_file))}",
+            ]
+        )
+        current_ms = end_ms
+    metadata_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def create_marked_m4a(input_dir: str | Path, output_file: str | Path) -> Path:
+    """
+    Combine exported m4a files into one m4a with one chapter marker per source file.
+
+    Files are ordered by the current exporter naming scheme:
+    Chapter_001.m4a or Chapter_001_Scene_001.m4a.
+    """
+    output_path = Path(output_file)
+    output_resolved = output_path.resolve()
+    files = [path for path in exported_m4a_files(input_dir) if path.resolve() != output_resolved]
+    if not files:
+        raise ValueError(f"No .m4a files found in {input_dir}")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        concat_file = tmp_dir / "concat.txt"
+        metadata_file = tmp_dir / "chapters.ffmetadata"
+
+        concat_file.write_text(
+            "".join(f"file '{_ffconcat_quote(audio_file)}'\n" for audio_file in files),
+            encoding="utf-8",
+        )
+        _write_marked_m4a_metadata(files, metadata_file)
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(concat_file),
+            "-i", str(metadata_file),
+            "-map", "0:a",
+            "-map_metadata", "1",
+            "-map_chapters", "1",
+            "-c", "copy",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"ffmpeg failed with exit code {result.returncode}")
+
+    return output_path.resolve()
 
 class BookReaderGUI:
     """
@@ -103,6 +250,9 @@ class BookReaderGUI:
         self.btn_export = tk.Button(ctrl_frame, text="Export Audio", command=self.export_audio_dialog, state=tk.DISABLED)
         self.btn_export.pack(side=tk.LEFT, padx=5)
 
+        self.btn_combine = tk.Button(ctrl_frame, text="Combine M4A", command=self.combine_audio_dialog)
+        self.btn_combine.pack(side=tk.LEFT, padx=5)
+
         self.btn_exit = tk.Button(ctrl_frame, text="Exit", command=self.exit_app)
         self.btn_exit.pack(side=tk.RIGHT, padx=5)
 
@@ -120,6 +270,11 @@ class BookReaderGUI:
         self.tts_voice_var = tk.StringVar(value=self.voice)
         self.om_voice = tk.OptionMenu(tts_frame, self.tts_voice_var, *available_voices(self.tts_model_var.get()), command=self.on_voice_changed)
         self.om_voice.pack(side=tk.LEFT)
+
+        tk.Label(tts_frame, text="Export:").pack(side=tk.LEFT, padx=(15, 5))
+        self.export_mode_var = tk.StringVar(value="Chapter")
+        self.om_export_mode = tk.OptionMenu(tts_frame, self.export_mode_var, *EXPORT_MODES)
+        self.om_export_mode.pack(side=tk.LEFT)
 
         self.btn_test_voice = tk.Button(tts_frame, text="Test Voice", command=self.test_voice, state=tk.DISABLED)
         self.btn_test_voice.pack(side=tk.LEFT, padx=(15, 5))
@@ -554,6 +709,34 @@ class BookReaderGUI:
             else:
                 messagebox.showerror("Error", "Could not load bookmark. Path might be different.")
 
+    def combine_audio_dialog(self):
+        input_dir = filedialog.askdirectory(title="Select Directory of Exported M4A Files")
+        if not input_dir:
+            return
+
+        output_file = filedialog.asksaveasfilename(
+            defaultextension=".m4a",
+            filetypes=[("M4A Audio", "*.m4a")],
+            initialdir=input_dir,
+            initialfile="combined_with_markers.m4a",
+            title="Save Combined M4A",
+        )
+        if not output_file:
+            return
+
+        self.btn_combine.config(state=tk.DISABLED)
+        self.log_status(f"Combining audio from {os.path.basename(input_dir)}...")
+        threading.Thread(target=self._combine_audio_worker, args=(Path(input_dir), Path(output_file)), daemon=True).start()
+
+    def _combine_audio_worker(self, input_dir, output_file):
+        try:
+            combined = create_marked_m4a(input_dir, output_file)
+            self.root.after(0, lambda: self.log_status(f"Combined audio saved: {combined.name}"))
+        except Exception as e:
+            self.root.after(0, lambda: self.handle_error("Combine Audio Error", e))
+        finally:
+            self.root.after(0, lambda: self.btn_combine.config(state=tk.NORMAL))
+
     def export_audio_dialog(self):
         if not self.reader: return
         if not self.model:
@@ -569,10 +752,11 @@ class BookReaderGUI:
         self.btn_stop.config(state=tk.NORMAL)
         self.stop_event.clear()
         
-        self.log_status(f"Starting export to {os.path.basename(out_dir)}...")
-        threading.Thread(target=self._export_worker, args=(Path(out_dir),), daemon=True).start()
+        export_mode = self.export_mode_var.get()
+        self.log_status(f"Starting {export_mode.lower()} export to {os.path.basename(out_dir)}...")
+        threading.Thread(target=self._export_worker, args=(Path(out_dir), export_mode), daemon=True).start()
 
-    def _export_worker(self, out_dir):
+    def _export_worker(self, out_dir, export_mode="Chapter"):
         try:
             export_reader = BookReader(self.reader.scenes_dir)
             export_reader._index = self.reader._index
@@ -583,21 +767,19 @@ class BookReaderGUI:
                 self.root.after(0, lambda: self.log_status("No scenes to export."))
                 return
 
-            chapters = {}
-            for sc in remaining_scenes:
-                chapters.setdefault(sc.chapter, []).append(sc)
+            export_units = export_units_for_scenes(remaining_scenes, export_mode)
 
             sr = 24000
             if hasattr(self.speaker, 'sr'):
                 sr = self.speaker.sr
 
-            total_chapters = len(chapters)
-            for idx, (ch_num, sc_list) in enumerate(chapters.items(), 1):
+            total_units = len(export_units)
+            for idx, (unit_label, filename, sc_list) in enumerate(export_units, 1):
                 if self.stop_event.is_set():
                     break
 
-                outfile = out_dir / f"Chapter_{ch_num}.m4a"
-                self.root.after(0, lambda c=ch_num, i=idx, t=total_chapters: self.log_status(f"Exporting Chapter {c} ({i}/{t})..."))
+                outfile = out_dir / filename
+                self.root.after(0, lambda label=unit_label, i=idx, t=total_units: self.log_status(f"Exporting {label} ({i}/{t})..."))
 
                 cmd = [
                     "ffmpeg", "-y",
@@ -625,7 +807,7 @@ class BookReaderGUI:
                                 break
                             sent_idx = export_reader._sentence_index
                             total_sents = len(export_reader._scenes[sc_idx].sentences())
-                            self.root.after(0, lambda c=ch_num, s=sent_idx, t=total_sents: self.log_status(f"Exporting Chapter {c}... ({s}/{t} sentences)"))
+                            self.root.after(0, lambda label=unit_label, s=sent_idx, t=total_sents: self.log_status(f"Exporting {label}... ({s}/{t} sentences)"))
                             
                             text = export_reader.get_next_chunk(max_chars=500)
                             if not text:
